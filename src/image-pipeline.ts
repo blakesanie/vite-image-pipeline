@@ -80,11 +80,10 @@ export class ImagePipelineEngine {
       console.log("inside globalPipelinePromise");
       globalPipelinePromise = (async () => {
         console.log("inside globalPipelinePromise async");
-        // 1. Tell transformers to NEVER look at or write to the filesystem themselves
-        env.allowLocalModels = false;
-        env.useFSCache = false;
-        env.cacheDir = path.resolve(this.modelCachePath);
 
+        // 1. Configure standard global storage locations
+        env.useFSCache = true;
+        env.cacheDir = path.resolve(this.modelCachePath);
         if (env.backends?.onnx?.wasm) {
           env.backends.onnx.wasm.numThreads = 4;
         }
@@ -100,38 +99,46 @@ export class ImagePipelineEngine {
           device: "cpu",
         };
 
-        // 2. Safely read file manually to bypass onnxruntime-node's bad mmap()
-        if (existsSync(modelFilePath)) {
-          // Ensure the file is actually fully written if another process just created it
-          let sizeA = (await fs.stat(modelFilePath)).size;
-          await new Promise((r) => setTimeout(r, 100));
-          let sizeB = (await fs.stat(modelFilePath)).size;
+        let loadedPipeline: any = null;
 
-          while (sizeA !== sizeB || sizeA === 0) {
-            await new Promise((r) => setTimeout(r, 500));
-            sizeA = sizeB;
-            sizeB = (await fs.stat(modelFilePath)).size;
-          }
-
+        // 2. Strategy: Try reading from local cache natively first
+        try {
           console.log(
-            `[image-pipeline] Loading model directly from memory buffer...`,
+            `[astro-image-pipeline] Testing local storage engine for model cache structure...`,
           );
-          const buffer = await fs.readFile(modelFilePath);
 
-          // Inject the raw buffer directly. This completely cuts out the C++ filesystem loader
-          pipelineOptions.model_body = buffer;
-        } else {
+          // Force the framework to ONLY look locally. It throws if anything is missing/broken.
+          env.allowLocalModels = true;
+
+          loadedPipeline = await pipeline(
+            "image-feature-extraction",
+            this.modelName,
+            pipelineOptions,
+          );
+
           console.log(
-            `[image-pipeline] No local file found. Bootstrapping initial download...`,
+            `[astro-image-pipeline] Model successfully verified and loaded from disk location: ${modelFilePath}`,
+          );
+        } catch (localError) {
+          // 3. Fallback: Local lookup failed, flag a web-based download bootstrap sequence
+          console.log(
+            `[astro-image-pipeline] Model not found locally or structure corrupted. Bootstrapping initial download...`,
+          );
+
+          env.allowLocalModels = false; // Open network layer permission
+
+          loadedPipeline = await pipeline(
+            "image-feature-extraction",
+            this.modelName,
+            pipelineOptions,
+          );
+
+          console.log(
+            `[astro-image-pipeline] Model downloaded and saved natively to directory structure under: ${env.cacheDir}`,
           );
         }
 
-        // 3. Initialize under standard image-feature-extraction task
-        return await pipeline(
-          "image-feature-extraction",
-          this.modelName,
-          pipelineOptions,
-        );
+        return loadedPipeline;
       })();
     }
 
@@ -151,11 +158,18 @@ export class ImagePipelineEngine {
       JSON.stringify(this.metadataCache, null, 2),
       "utf-8",
     );
+    console.log(
+      `[astro-image-pipeline] Cache saved to ${this.metadataCachePath}`,
+    );
+
     await fs.mkdir(path.dirname(this.embeddingCachePath), { recursive: true });
     await fs.writeFile(
       this.embeddingCachePath,
       JSON.stringify(this.embeddingCache, null, 2),
       "utf-8",
+    );
+    console.log(
+      `[astro-image-pipeline] Cache saved to ${this.embeddingCachePath}`,
     );
   }
 
@@ -164,7 +178,6 @@ export class ImagePipelineEngine {
    */
   public async getMetadata(filePaths: string[]): Promise<Record<string, Tags>> {
     await this.loadCache();
-    console.log("metadata cache", this.metadataCache);
     const results: Record<string, Tags> = {};
     // Unique hashes that actually require an ExifTool disk read
     const distinctHashesToProcess = new Set<string>();
@@ -172,28 +185,30 @@ export class ImagePipelineEngine {
     const hashToPathsMap: Record<string, string> = {};
 
     const rawPathsConsidered = new Set<string>();
+    let cacheHits = 0;
 
     // 1. Calculate hashes concurrently to evaluate cache hits
     for (const rawPath of filePaths) {
-      console.log("rawPath", rawPath);
       if (rawPathsConsidered.has(rawPath)) continue;
       rawPathsConsidered.add(rawPath);
       const absolutePath = path.resolve(rawPath);
-      console.log("absolutePath", absolutePath);
       if (!existsSync(absolutePath)) continue;
 
       const sha = await this.getFileHash(absolutePath);
-      console.log("sha", sha, rawPath);
 
       if (this.metadataCache[sha]) {
         results[absolutePath] = this.metadataCache[sha];
+        cacheHits++;
         continue;
       }
 
       distinctHashesToProcess.add(sha);
-
       hashToPathsMap[sha] = absolutePath;
     }
+
+    console.log(
+      `[astro-image-pipeline] Metadata statistics -> Cached items utilized: ${cacheHits}, Items to parse: ${distinctHashesToProcess.size}`,
+    );
 
     console.log("distinctHashesToProcess", distinctHashesToProcess);
     if (distinctHashesToProcess.size === 0) return results;
@@ -215,7 +230,7 @@ export class ImagePipelineEngine {
         results[hashToPathsMap[sha]] = tags;
       } catch (err) {
         console.error(
-          `[image-pipeline] EXIF Error for hash ${sha.slice(0, 8)} (${path.basename(absoluteTargetPath)}):`,
+          `[astro-image-pipeline] EXIF Error for hash ${sha.slice(0, 8)} (${path.basename(absoluteTargetPath)}):`,
           err,
         );
       }
@@ -238,6 +253,7 @@ export class ImagePipelineEngine {
     const hashToPathsMap: Record<string, string> = {};
 
     const rawPathsConsidered = new Set<string>();
+    let cacheHits = 0;
 
     // 1. Calculate hashes concurrently to evaluate cache hits
     for (const rawPath of filePaths) {
@@ -250,6 +266,7 @@ export class ImagePipelineEngine {
 
       if (this.embeddingCache[sha]) {
         results[absolutePath] = this.embeddingCache[sha];
+        cacheHits++;
         continue;
       }
       distinctHashesToProcess.add(sha);
@@ -257,6 +274,11 @@ export class ImagePipelineEngine {
     }
 
     const pendingHashes = Array.from(distinctHashesToProcess);
+    console.log(
+      `[astro-image-pipeline] Embedding statistics -> Cached items utilized: ${cacheHits}, Items to calculate: ${pendingHashes.length}`,
+    );
+
+    const _ = await this.getPipeline();
     if (pendingHashes.length === 0) return results;
 
     // 2. Batch Tensor WebGPU Evaluation Track
@@ -301,7 +323,7 @@ export class ImagePipelineEngine {
           results[hashToPathsMap[sha]] = vector;
         });
       } catch (err) {
-        console.error(`[image-pipeline] Embedding Batch Error:`, err);
+        console.error(`[astro-image-pipeline] Embedding Batch Error:`, err);
       }
     }
 
