@@ -1,0 +1,28 @@
+{
+  "name": "astro-image-pipeline",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "./dist/plugins/astro.js",
+  "types": "./dist/plugins/astro.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "exiftool-vendored": "^28.0.0",
+    "onnxruntime-node": "^1.26.0",
+    "sharp": "^0.33.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.2.0",
+    "astro": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.9"
+  }
+}
