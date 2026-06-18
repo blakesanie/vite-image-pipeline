@@ -28,6 +28,10 @@ export class ImagePipelineEngine {
   private visionPipeline: any = null;
   private ML_BATCH_SIZE: number;
 
+  // --- Concurrency Locks ---
+  private metadataLock: Promise<any> = Promise.resolve();
+  private embeddingLock: Promise<any> = Promise.resolve();
+
   constructor(
     options: {
       modelName?: string;
@@ -143,9 +147,6 @@ export class ImagePipelineEngine {
     return this.visionPipeline;
   }
 
-  /**
-   * Stream-based content hashing keeps memory low by avoiding massive buffer instantiations.
-   */
   private async getFileHash(filePath: string): Promise<string> {
     const handle = await fs.open(filePath, "r");
     const stream = handle.createReadStream();
@@ -206,74 +207,84 @@ export class ImagePipelineEngine {
 
   /**
    * 📸 Public Metadata Extraction Method (Content-Addressable)
+   * Guaranteed to execute sequentially across concurrent calls.
    */
   public async getMetadata(filePaths: string[]): Promise<Record<string, Tags>> {
-    const startTime = Date.now();
-    await this.loadCache();
+    // Intercept with the class-level lock
+    const currentLock = this.metadataLock.catch(() => {});
 
-    const results: Record<string, Tags> = {};
-    const distinctHashesToProcess = new Set<string>();
-    const hashToPathsMap: Record<string, string> = {};
-    const processedPaths = new Set<string>();
-    let cacheHits = 0;
+    const executionPromise = (async () => {
+      await currentLock; // Wait for any existing metadata job to clear
 
-    console.log(
-      `[astro-image-pipeline] Mapping content hashes for ${filePaths.length} incoming targets`,
-    );
+      const startTime = Date.now();
+      await this.loadCache();
 
-    await this.processFileHashesBatch(
-      filePaths,
-      (sha) => this.metadataCache[sha],
-      (absolutePath, cachedTags) => {
-        results[absolutePath] = cachedTags;
-        cacheHits++;
-      },
-      (sha, absolutePath) => {
-        distinctHashesToProcess.add(sha);
-        hashToPathsMap[sha] = absolutePath;
-      },
-    );
+      const results: Record<string, Tags> = {};
+      const distinctHashesToProcess = new Set<string>();
+      const hashToPathsMap: Record<string, string> = {};
+      let cacheHits = 0;
 
-    console.log(
-      `[astro-image-pipeline] Metadata Manifest -> Hits: ${cacheHits}, Read-Queue: ${distinctHashesToProcess.size}`,
-    );
-    if (distinctHashesToProcess.size === 0) return results;
+      console.log(
+        `[astro-image-pipeline] Mapping content hashes for ${filePaths.length} incoming targets`,
+      );
 
-    let processedSinceLastSave = 0;
-    // Periodic write interval bounds execution safety
-    const FLUSH_INTERVAL = 10;
+      await this.processFileHashesBatch(
+        filePaths,
+        (sha) => this.metadataCache[sha],
+        (absolutePath, cachedTags) => {
+          results[absolutePath] = cachedTags;
+          cacheHits++;
+        },
+        (sha, absolutePath) => {
+          distinctHashesToProcess.add(sha);
+          hashToPathsMap[sha] = absolutePath;
+        },
+      );
 
-    for (const sha of distinctHashesToProcess) {
-      const targetPath = hashToPathsMap[sha];
-      try {
-        const tags = await exiftool.read(targetPath);
-        this.metadataCache[sha] = tags;
-        results[targetPath] = tags;
+      console.log(
+        `[astro-image-pipeline] Metadata Manifest -> Hits: ${cacheHits}, Read-Queue: ${distinctHashesToProcess.size}`,
+      );
+      if (distinctHashesToProcess.size === 0) return results;
 
-        processedSinceLastSave++;
-        if (processedSinceLastSave >= FLUSH_INTERVAL) {
-          console.log(
-            `[astro-image-pipeline] Intermediate metadata threshold hit (${processedSinceLastSave} items). Syncing checkpoint...`,
+      let processedSinceLastSave = 0;
+      const FLUSH_INTERVAL = 10;
+
+      for (const sha of distinctHashesToProcess) {
+        const targetPath = hashToPathsMap[sha];
+        try {
+          const tags = await exiftool.read(targetPath);
+          this.metadataCache[sha] = tags;
+          results[targetPath] = tags;
+
+          processedSinceLastSave++;
+          if (processedSinceLastSave >= FLUSH_INTERVAL) {
+            console.log(
+              `[astro-image-pipeline] Intermediate metadata threshold hit (${processedSinceLastSave} items). Syncing checkpoint...`,
+            );
+            await this.saveMetadataCache();
+            processedSinceLastSave = 0;
+          }
+        } catch (err) {
+          console.error(
+            `[astro-image-pipeline] EXIF Extraction Failure for ${path.basename(targetPath)}:`,
+            err,
           );
-          await this.saveMetadataCache();
-          processedSinceLastSave = 0;
         }
-      } catch (err) {
-        console.error(
-          `[astro-image-pipeline] EXIF Extraction Failure for ${path.basename(targetPath)}:`,
-          err,
-        );
       }
-    }
 
-    if (processedSinceLastSave > 0) {
-      await this.saveMetadataCache();
-    }
+      if (processedSinceLastSave > 0) {
+        await this.saveMetadataCache();
+      }
 
-    console.log(
-      `[astro-image-pipeline] Metadata extraction run completed in ${((Date.now() - startTime) / 1000).toFixed(2)}s`,
-    );
-    return results;
+      console.log(
+        `[astro-image-pipeline] Metadata extraction run completed in ${((Date.now() - startTime) / 1000).toFixed(2)}s`,
+      );
+      return results;
+    })();
+
+    // Update the lock to point to the current active execution
+    this.metadataLock = executionPromise;
+    return executionPromise;
   }
 
   private async processFileHashesBatch(
@@ -320,102 +331,114 @@ export class ImagePipelineEngine {
 
   /**
    * 🧠 Public WebGPU Embedding Extraction Method (Content-Addressable)
+   * Guaranteed to execute sequentially across concurrent calls.
    */
   public async getEmbeddings(
     filePaths: string[],
   ): Promise<Record<string, number[]>> {
-    const startTime = Date.now();
-    await this.loadCache();
+    // Intercept with the class-level lock
+    const currentLock = this.embeddingLock.catch(() => {});
 
-    const results: Record<string, number[]> = {};
-    const distinctHashesToProcess = new Set<string>();
-    const hashToPathsMap: Record<string, string> = {};
-    const processedPaths = new Set<string>();
-    let cacheHits = 0;
+    const executionPromise = (async () => {
+      await currentLock; // Wait for any existing embedding job to clear
 
-    console.log(
-      `[astro-image-pipeline] Mapping content hashes for vector targets...`,
-    );
+      const startTime = Date.now();
+      await this.loadCache();
 
-    await this.processFileHashesBatch(
-      filePaths,
-      (sha) => this.embeddingCache[sha],
-      (absolutePath, cachedVector) => {
-        results[absolutePath] = cachedVector;
-        cacheHits++;
-      },
-      (sha, absolutePath) => {
-        distinctHashesToProcess.add(sha);
-        hashToPathsMap[sha] = absolutePath;
-      },
-    );
-
-    const pendingHashes = Array.from(distinctHashesToProcess);
-    console.log(
-      `[astro-image-pipeline] Embedding Manifest -> Hits: ${cacheHits}, Compute-Queue: ${pendingHashes.length}`,
-    );
-
-    if (pendingHashes.length === 0) return results;
-
-    const extractor = await this.getPipeline();
-    const totalBatches = Math.ceil(pendingHashes.length / this.ML_BATCH_SIZE);
-
-    for (let i = 0; i < pendingHashes.length; i += this.ML_BATCH_SIZE) {
-      const currentBatchHashes = pendingHashes.slice(i, i + this.ML_BATCH_SIZE);
-      const currentBatchIndex = Math.floor(i / this.ML_BATCH_SIZE) + 1;
+      const results: Record<string, number[]> = {};
+      const distinctHashesToProcess = new Set<string>();
+      const hashToPathsMap: Record<string, string> = {};
+      let cacheHits = 0;
 
       console.log(
-        `[astro-image-pipeline] Processing ML inference batch ${currentBatchIndex}/${totalBatches} (${currentBatchHashes.length} items)...`,
+        `[astro-image-pipeline] Mapping content hashes for vector targets...`,
       );
 
-      try {
-        // Parallelized sharp processing throttled implicitly by the batch sizing constraints
-        const imageBuffers = await Promise.all(
-          currentBatchHashes.map(async (sha) => {
-            const samplePath = hashToPathsMap[sha];
-            const { data, info } = await sharp(samplePath)
-              .resize(224, 224, { fit: "fill" })
-              .removeAlpha()
-              .raw()
-              .toBuffer({ resolveWithObject: true });
+      await this.processFileHashesBatch(
+        filePaths,
+        (sha) => this.embeddingCache[sha],
+        (absolutePath, cachedVector) => {
+          results[absolutePath] = cachedVector;
+          cacheHits++;
+        },
+        (sha, absolutePath) => {
+          distinctHashesToProcess.add(sha);
+          hashToPathsMap[sha] = absolutePath;
+        },
+      );
 
-            return new RawImage(
-              new Uint8Array(data),
-              info.width,
-              info.height,
-              3,
-            );
-          }),
+      const pendingHashes = Array.from(distinctHashesToProcess);
+      console.log(
+        `[astro-image-pipeline] Embedding Manifest -> Hits: ${cacheHits}, Compute-Queue: ${pendingHashes.length}`,
+      );
+
+      if (pendingHashes.length === 0) return results;
+
+      const extractor = await this.getPipeline();
+      const totalBatches = Math.ceil(pendingHashes.length / this.ML_BATCH_SIZE);
+
+      for (let i = 0; i < pendingHashes.length; i += this.ML_BATCH_SIZE) {
+        const currentBatchHashes = pendingHashes.slice(
+          i,
+          i + this.ML_BATCH_SIZE,
         );
+        const currentBatchIndex = Math.floor(i / this.ML_BATCH_SIZE) + 1;
 
-        const outputs = await extractor(imageBuffers, {
-          pooling: "mean",
-          normalize: true,
-        });
-
-        currentBatchHashes.forEach((sha, index) => {
-          const vector = Array.from(outputs[index].data) as number[];
-          this.embeddingCache[sha] = vector;
-          results[hashToPathsMap[sha]] = vector;
-        });
-
-        // Safe checkpoint save: write cache after every single batch evaluation run succeeds
         console.log(
-          `[astro-image-pipeline] Batch ${currentBatchIndex} evaluation finished cleanly. Saving progress...`,
+          `[astro-image-pipeline] Processing ML inference batch ${currentBatchIndex}/${totalBatches} (${currentBatchHashes.length} items)...`,
         );
-        await this.saveEmbeddingCache();
-      } catch (err) {
-        console.error(
-          `[astro-image-pipeline] Critical execution fault in ML Inference Batch ${currentBatchIndex}:`,
-          err,
-        );
-      }
-    }
 
-    console.log(
-      `[astro-image-pipeline] Embedding generation run completed in ${((Date.now() - startTime) / 1000).toFixed(2)}s`,
-    );
-    return results;
+        try {
+          const imageBuffers = await Promise.all(
+            currentBatchHashes.map(async (sha) => {
+              const samplePath = hashToPathsMap[sha];
+              const { data, info } = await sharp(samplePath)
+                .resize(224, 224, { fit: "fill" })
+                .removeAlpha()
+                .raw()
+                .toBuffer({ resolveWithObject: true });
+
+              return new RawImage(
+                new Uint8Array(data),
+                info.width,
+                info.height,
+                3,
+              );
+            }),
+          );
+
+          const outputs = await extractor(imageBuffers, {
+            pooling: "mean",
+            normalize: true,
+          });
+
+          currentBatchHashes.forEach((sha, index) => {
+            const vector = Array.from(outputs[index].data) as number[];
+            this.embeddingCache[sha] = vector;
+            results[hashToPathsMap[sha]] = vector;
+          });
+
+          console.log(
+            `[astro-image-pipeline] Batch ${currentBatchIndex} evaluation finished cleanly. Saving progress...`,
+          );
+          await this.saveEmbeddingCache();
+        } catch (err) {
+          console.error(
+            `[astro-image-pipeline] Critical execution fault in ML Inference Batch ${currentBatchIndex}:`,
+            err,
+          );
+        }
+      }
+
+      console.log(
+        `[astro-image-pipeline] Embedding generation run completed in ${((Date.now() - startTime) / 1000).toFixed(2)}s`,
+      );
+      return results;
+    })();
+
+    // Update the lock to point to the current active execution
+    this.embeddingLock = executionPromise;
+    return executionPromise;
   }
 
   public async shutdown() {
