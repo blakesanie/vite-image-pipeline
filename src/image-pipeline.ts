@@ -7,14 +7,12 @@ import path from "path";
 import sharp from "sharp";
 
 export interface MetadataCacheSchema {
-  // Keyed by SHA-256 content hash instead of system file path
   [fileSha: string]: {
     [key: string]: any;
   };
 }
 
 export interface EmbeddingCacheSchema {
-  // Keyed by SHA-256 content hash instead of system file path
   [fileSha: string]: number[];
 }
 
@@ -52,11 +50,18 @@ export class ImagePipelineEngine {
   }
 
   public async loadCache() {
+    console.log("[astro-image-pipeline] Loading cache layers from disk...");
     if (existsSync(this.metadataCachePath)) {
       try {
         const raw = await fs.readFile(this.metadataCachePath, "utf-8");
         this.metadataCache = JSON.parse(raw);
+        console.log(
+          `[astro-image-pipeline] Metadata cache hydrated (${Object.keys(this.metadataCache).length} entries)`,
+        );
       } catch (e) {
+        console.warn(
+          "[astro-image-pipeline] Metadata cache corrupt or unreadable, resetting.",
+        );
         this.metadataCache = {};
       }
     }
@@ -65,23 +70,23 @@ export class ImagePipelineEngine {
       try {
         const raw = await fs.readFile(this.embeddingCachePath, "utf-8");
         this.embeddingCache = JSON.parse(raw);
+        console.log(
+          `[astro-image-pipeline] Embedding cache hydrated (${Object.keys(this.embeddingCache).length} entries)`,
+        );
       } catch (e) {
+        console.warn(
+          "[astro-image-pipeline] Embedding cache corrupt or unreadable, resetting.",
+        );
         this.embeddingCache = {};
       }
     }
   }
 
   public async getPipeline() {
-    console.log("start getPipeline()");
     if (this.visionPipeline) return this.visionPipeline;
 
-    // Use a unified promise chain to catch execution blocks inside the same thread
     if (!globalPipelinePromise) {
-      console.log("inside globalPipelinePromise");
       globalPipelinePromise = (async () => {
-        console.log("inside globalPipelinePromise async");
-
-        // 1. Configure standard global storage locations
         env.useFSCache = true;
         env.cacheDir = path.resolve(this.modelCachePath);
         if (env.backends?.onnx?.wasm) {
@@ -95,19 +100,13 @@ export class ImagePipelineEngine {
           "model.onnx",
         );
 
-        const pipelineOptions: Record<string, any> = {
-          device: "cpu",
-        };
-
+        const pipelineOptions: Record<string, any> = { device: "cpu" };
         let loadedPipeline: any = null;
 
-        // 2. Strategy: Try reading from local cache natively first
         try {
           console.log(
-            `[astro-image-pipeline] Testing local storage engine for model cache structure...`,
+            `[astro-image-pipeline] Searching for local model cache layout...`,
           );
-
-          // Force the framework to ONLY look locally. It throws if anything is missing/broken.
           env.allowLocalModels = true;
 
           loadedPipeline = await pipeline(
@@ -117,15 +116,13 @@ export class ImagePipelineEngine {
           );
 
           console.log(
-            `[astro-image-pipeline] Model successfully verified and loaded from disk location: ${modelFilePath}`,
+            `[astro-image-pipeline] Verified and active: ${modelFilePath}`,
           );
         } catch (localError) {
-          // 3. Fallback: Local lookup failed, flag a web-based download bootstrap sequence
           console.log(
-            `[astro-image-pipeline] Model not found locally or structure corrupted. Bootstrapping initial download...`,
+            `[astro-image-pipeline] Local model footprint missing/stale. Initiating network bootstrap...`,
           );
-
-          env.allowLocalModels = false; // Open network layer permission
+          env.allowLocalModels = false;
 
           loadedPipeline = await pipeline(
             "image-feature-extraction",
@@ -134,7 +131,7 @@ export class ImagePipelineEngine {
           );
 
           console.log(
-            `[astro-image-pipeline] Model downloaded and saved natively to directory structure under: ${env.cacheDir}`,
+            `[astro-image-pipeline] Download sequence complete. Saved natively under: ${env.cacheDir}`,
           );
         }
 
@@ -146,98 +143,179 @@ export class ImagePipelineEngine {
     return this.visionPipeline;
   }
 
+  /**
+   * Stream-based content hashing keeps memory low by avoiding massive buffer instantiations.
+   */
   private async getFileHash(filePath: string): Promise<string> {
-    const fileBuffer = await fs.readFile(filePath);
-    return crypto.createHash("sha256").update(fileBuffer).digest("hex");
+    const handle = await fs.open(filePath, "r");
+    const stream = handle.createReadStream();
+    const hash = crypto.createHash("sha256");
+
+    return new Promise((resolve, reject) => {
+      stream.on("data", (chunk) => hash.update(chunk));
+      stream.on("end", () => {
+        handle.close().catch(console.error);
+        resolve(hash.digest("hex"));
+      });
+      stream.on("error", (err) => {
+        handle.close().catch(console.error);
+        reject(err);
+      });
+    });
   }
 
-  private async saveCache() {
-    await fs.mkdir(path.dirname(this.metadataCachePath), { recursive: true });
-    await fs.writeFile(
-      this.metadataCachePath,
-      JSON.stringify(this.metadataCache, null, 2),
-      "utf-8",
-    );
-    console.log(
-      `[astro-image-pipeline] Cache saved to ${this.metadataCachePath}`,
-    );
+  private async saveMetadataCache() {
+    try {
+      await fs.mkdir(path.dirname(this.metadataCachePath), { recursive: true });
+      await fs.writeFile(
+        this.metadataCachePath,
+        JSON.stringify(this.metadataCache, null, 2),
+        "utf-8",
+      );
+      console.log(
+        `[astro-image-pipeline] Metadata cache flushed sequentially (${Object.keys(this.metadataCache).length} keys total)`,
+      );
+    } catch (err) {
+      console.error(
+        "[astro-image-pipeline] Failed to sync metadata cache to disk:",
+        err,
+      );
+    }
+  }
 
-    await fs.mkdir(path.dirname(this.embeddingCachePath), { recursive: true });
-    await fs.writeFile(
-      this.embeddingCachePath,
-      JSON.stringify(this.embeddingCache, null, 2),
-      "utf-8",
-    );
-    console.log(
-      `[astro-image-pipeline] Cache saved to ${this.embeddingCachePath}`,
-    );
+  private async saveEmbeddingCache() {
+    try {
+      await fs.mkdir(path.dirname(this.embeddingCachePath), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        this.embeddingCachePath,
+        JSON.stringify(this.embeddingCache, null, 2),
+        "utf-8",
+      );
+      console.log(
+        `[astro-image-pipeline] Embedding cache flushed sequentially (${Object.keys(this.embeddingCache).length} keys total)`,
+      );
+    } catch (err) {
+      console.error(
+        "[astro-image-pipeline] Failed to sync embedding cache to disk:",
+        err,
+      );
+    }
   }
 
   /**
    * 📸 Public Metadata Extraction Method (Content-Addressable)
    */
   public async getMetadata(filePaths: string[]): Promise<Record<string, Tags>> {
+    const startTime = Date.now();
     await this.loadCache();
-    const results: Record<string, Tags> = {};
-    // Unique hashes that actually require an ExifTool disk read
-    const distinctHashesToProcess = new Set<string>();
-    // Maps a hash back to an array of paths that share it (for unpacking results)
-    const hashToPathsMap: Record<string, string> = {};
 
-    const rawPathsConsidered = new Set<string>();
+    const results: Record<string, Tags> = {};
+    const distinctHashesToProcess = new Set<string>();
+    const hashToPathsMap: Record<string, string> = {};
+    const processedPaths = new Set<string>();
     let cacheHits = 0;
 
-    // 1. Calculate hashes concurrently to evaluate cache hits
-    for (const rawPath of filePaths) {
-      if (rawPathsConsidered.has(rawPath)) continue;
-      rawPathsConsidered.add(rawPath);
-      const absolutePath = path.resolve(rawPath);
-      if (!existsSync(absolutePath)) continue;
-
-      const sha = await this.getFileHash(absolutePath);
-
-      if (this.metadataCache[sha]) {
-        results[absolutePath] = this.metadataCache[sha];
-        cacheHits++;
-        continue;
-      }
-
-      distinctHashesToProcess.add(sha);
-      hashToPathsMap[sha] = absolutePath;
-    }
-
     console.log(
-      `[astro-image-pipeline] Metadata statistics -> Cached items utilized: ${cacheHits}, Items to parse: ${distinctHashesToProcess.size}`,
+      `[astro-image-pipeline] Mapping content hashes for ${filePaths.length} incoming targets`,
     );
 
-    console.log("distinctHashesToProcess", distinctHashesToProcess);
+    await this.processFileHashesBatch(
+      filePaths,
+      (sha) => this.metadataCache[sha],
+      (absolutePath, cachedTags) => {
+        results[absolutePath] = cachedTags;
+        cacheHits++;
+      },
+      (sha, absolutePath) => {
+        distinctHashesToProcess.add(sha);
+        hashToPathsMap[sha] = absolutePath;
+      },
+    );
+
+    console.log(
+      `[astro-image-pipeline] Metadata Manifest -> Hits: ${cacheHits}, Read-Queue: ${distinctHashesToProcess.size}`,
+    );
     if (distinctHashesToProcess.size === 0) return results;
 
-    // 2. Process metadata for hashes not found in the cache
+    let processedSinceLastSave = 0;
+    // Periodic write interval bounds execution safety
+    const FLUSH_INTERVAL = 10;
 
     for (const sha of distinctHashesToProcess) {
-      // Pick the first available path matching this hash to pull metadata from
       const targetPath = hashToPathsMap[sha];
-      const absoluteTargetPath = path.resolve(targetPath);
-
       try {
-        const tags = await exiftool.read(absoluteTargetPath);
-
-        // Initialize or update the cache structural entry for this SHA
+        const tags = await exiftool.read(targetPath);
         this.metadataCache[sha] = tags;
+        results[targetPath] = tags;
 
-        // Distribute the tags to all input paths sharing this SHA
-        results[hashToPathsMap[sha]] = tags;
+        processedSinceLastSave++;
+        if (processedSinceLastSave >= FLUSH_INTERVAL) {
+          console.log(
+            `[astro-image-pipeline] Intermediate metadata threshold hit (${processedSinceLastSave} items). Syncing checkpoint...`,
+          );
+          await this.saveMetadataCache();
+          processedSinceLastSave = 0;
+        }
       } catch (err) {
         console.error(
-          `[astro-image-pipeline] EXIF Error for hash ${sha.slice(0, 8)} (${path.basename(absoluteTargetPath)}):`,
+          `[astro-image-pipeline] EXIF Extraction Failure for ${path.basename(targetPath)}:`,
           err,
         );
       }
     }
 
-    await this.saveCache();
+    if (processedSinceLastSave > 0) {
+      await this.saveMetadataCache();
+    }
+
+    console.log(
+      `[astro-image-pipeline] Metadata extraction run completed in ${((Date.now() - startTime) / 1000).toFixed(2)}s`,
+    );
     return results;
+  }
+
+  private async processFileHashesBatch(
+    filePaths: string[],
+    cacheCheckFn: (sha: string) => any,
+    onCacheHit: (absolutePath: string, cachedData: any) => void,
+    onCacheMiss: (sha: string, absolutePath: string) => void,
+    batchSize = 4,
+  ): Promise<void> {
+    const processedPaths = new Set<string>();
+    const n = Math.ceil(filePaths.length / batchSize);
+
+    for (let i = 0; i < filePaths.length; i += batchSize) {
+      const batchPaths = filePaths.slice(i, i + batchSize);
+
+      await Promise.all(
+        batchPaths.map(async (rawPath) => {
+          if (processedPaths.has(rawPath)) return;
+          processedPaths.add(rawPath);
+
+          const absolutePath = path.resolve(rawPath);
+          if (!existsSync(absolutePath)) return;
+
+          try {
+            const sha = await this.getFileHash(absolutePath);
+            const cachedItem = cacheCheckFn(sha);
+
+            if (cachedItem) {
+              onCacheHit(absolutePath, cachedItem);
+            } else {
+              onCacheMiss(sha, absolutePath);
+            }
+          } catch (hashErr) {
+            console.error(
+              `[astro-image-pipeline] Failed hashing target ${rawPath}:`,
+              hashErr,
+            );
+          }
+        }),
+      );
+      console.log("finished file hash batch", i / batchSize + 1, "of", n);
+    }
   }
 
   /**
@@ -246,66 +324,66 @@ export class ImagePipelineEngine {
   public async getEmbeddings(
     filePaths: string[],
   ): Promise<Record<string, number[]>> {
+    const startTime = Date.now();
     await this.loadCache();
-    const results: Record<string, number[]> = {};
 
+    const results: Record<string, number[]> = {};
     const distinctHashesToProcess = new Set<string>();
     const hashToPathsMap: Record<string, string> = {};
-
-    const rawPathsConsidered = new Set<string>();
+    const processedPaths = new Set<string>();
     let cacheHits = 0;
 
-    // 1. Calculate hashes concurrently to evaluate cache hits
-    for (const rawPath of filePaths) {
-      if (rawPathsConsidered.has(rawPath)) continue;
-      rawPathsConsidered.add(rawPath);
-      const absolutePath = path.resolve(rawPath);
-      if (!existsSync(absolutePath)) continue;
+    console.log(
+      `[astro-image-pipeline] Mapping content hashes for vector targets...`,
+    );
 
-      const sha = await this.getFileHash(absolutePath);
-
-      if (this.embeddingCache[sha]) {
-        results[absolutePath] = this.embeddingCache[sha];
+    await this.processFileHashesBatch(
+      filePaths,
+      (sha) => this.embeddingCache[sha],
+      (absolutePath, cachedVector) => {
+        results[absolutePath] = cachedVector;
         cacheHits++;
-        continue;
-      }
-      distinctHashesToProcess.add(sha);
-      hashToPathsMap[sha] = absolutePath;
-    }
+      },
+      (sha, absolutePath) => {
+        distinctHashesToProcess.add(sha);
+        hashToPathsMap[sha] = absolutePath;
+      },
+    );
 
     const pendingHashes = Array.from(distinctHashesToProcess);
     console.log(
-      `[astro-image-pipeline] Embedding statistics -> Cached items utilized: ${cacheHits}, Items to calculate: ${pendingHashes.length}`,
+      `[astro-image-pipeline] Embedding Manifest -> Hits: ${cacheHits}, Compute-Queue: ${pendingHashes.length}`,
     );
 
-    const _ = await this.getPipeline();
     if (pendingHashes.length === 0) return results;
 
-    // 2. Batch Tensor WebGPU Evaluation Track
     const extractor = await this.getPipeline();
+    const totalBatches = Math.ceil(pendingHashes.length / this.ML_BATCH_SIZE);
 
     for (let i = 0; i < pendingHashes.length; i += this.ML_BATCH_SIZE) {
       const currentBatchHashes = pendingHashes.slice(i, i + this.ML_BATCH_SIZE);
+      const currentBatchIndex = Math.floor(i / this.ML_BATCH_SIZE) + 1;
+
+      console.log(
+        `[astro-image-pipeline] Processing ML inference batch ${currentBatchIndex}/${totalBatches} (${currentBatchHashes.length} items)...`,
+      );
 
       try {
+        // Parallelized sharp processing throttled implicitly by the batch sizing constraints
         const imageBuffers = await Promise.all(
           currentBatchHashes.map(async (sha) => {
-            const samplePath = path.resolve(hashToPathsMap[sha]);
-
-            // 1. Tell sharp to output raw, uncompressed RGB pixel data
+            const samplePath = hashToPathsMap[sha];
             const { data, info } = await sharp(samplePath)
               .resize(224, 224, { fit: "fill" })
-              .removeAlpha() // Ensures 3 channels (RGB) instead of 4 (RGBA)
+              .removeAlpha()
               .raw()
               .toBuffer({ resolveWithObject: true });
 
-            // 2. Instantiated RawImage manually using Uint8Array
-            // This bypasses the buggy .read() signatures entirely
             return new RawImage(
               new Uint8Array(data),
               info.width,
               info.height,
-              3, // 3 channels: RGB
+              3,
             );
           }),
         );
@@ -317,21 +395,31 @@ export class ImagePipelineEngine {
 
         currentBatchHashes.forEach((sha, index) => {
           const vector = Array.from(outputs[index].data) as number[];
-
           this.embeddingCache[sha] = vector;
-
           results[hashToPathsMap[sha]] = vector;
         });
+
+        // Safe checkpoint save: write cache after every single batch evaluation run succeeds
+        console.log(
+          `[astro-image-pipeline] Batch ${currentBatchIndex} evaluation finished cleanly. Saving progress...`,
+        );
+        await this.saveEmbeddingCache();
       } catch (err) {
-        console.error(`[astro-image-pipeline] Embedding Batch Error:`, err);
+        console.error(
+          `[astro-image-pipeline] Critical execution fault in ML Inference Batch ${currentBatchIndex}:`,
+          err,
+        );
       }
     }
 
-    await this.saveCache();
+    console.log(
+      `[astro-image-pipeline] Embedding generation run completed in ${((Date.now() - startTime) / 1000).toFixed(2)}s`,
+    );
     return results;
   }
 
   public async shutdown() {
+    console.log("[astro-image-pipeline] Halting active ExifTool subsystems...");
     await exiftool.end();
   }
 }
