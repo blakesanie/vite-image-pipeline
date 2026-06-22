@@ -21,8 +21,8 @@ export class ImagePipelineEngine {
   private metadataCachePath: string;
   private embeddingCachePath: string;
   private modelCachePath: string;
-  private metadataCache: MetadataCacheSchema = {};
-  private embeddingCache: EmbeddingCacheSchema = {};
+  private metadataCache: MetadataCacheSchema | null = null;
+  private embeddingCache: EmbeddingCacheSchema | null = null;
   private modelName: string;
   private visionPipeline: any = null;
   private ML_BATCH_SIZE: number;
@@ -51,7 +51,7 @@ export class ImagePipelineEngine {
       options.modelCachePath || path.resolve(".image-pipeline/models");
   }
 
-  public async loadCache() {
+  private async loadMetadataCache() {
     if (existsSync(this.metadataCachePath)) {
       try {
         const raw = await fs.readFile(this.metadataCachePath, "utf-8");
@@ -60,6 +60,9 @@ export class ImagePipelineEngine {
         this.metadataCache = {};
       }
     }
+  }
+
+  private async loadEmbeddingCache() {
     if (existsSync(this.embeddingCachePath)) {
       try {
         const raw = await fs.readFile(this.embeddingCachePath, "utf-8");
@@ -133,7 +136,7 @@ export class ImagePipelineEngine {
         JSON.stringify(this.metadataCache, null, 2),
         "utf-8",
       );
-      console.log(`[astro-image-pipeline] Metadata cache written to ${this.metadataCachePath} for ${Object.keys(this.metadataCache).length} items.`);
+      console.log(`[astro-image-pipeline] Metadata cache written to ${this.metadataCachePath} for ${Object.keys(this.metadataCache || {}).length} items.`);
     } catch (err) {
       console.error(
         "[astro-image-pipeline] Failed to sync metadata cache:",
@@ -152,7 +155,7 @@ export class ImagePipelineEngine {
         JSON.stringify(this.embeddingCache, null, 2),
         "utf-8",
       );
-      console.log(`[astro-image-pipeline] Embedding cache written to ${this.embeddingCachePath} for ${Object.keys(this.embeddingCache).length} items.`);
+      console.log(`[astro-image-pipeline] Embedding cache written to ${this.embeddingCachePath} for ${Object.keys(this.embeddingCache || {}).length} items.`);
     } catch (err) {
       console.error(
         "[astro-image-pipeline] Failed to sync embedding cache:",
@@ -172,7 +175,8 @@ export class ImagePipelineEngine {
         throw new DOMException("Aborted", "AbortError");
 
       const startTime = Date.now();
-      if (Object.keys(this.metadataCache || {}).length === 0) await this.loadCache();
+      if (!this.metadataCache) await this.loadMetadataCache();
+      if (!this.metadataCache) throw Error(`[astro-image-pipeline] Failed to load metadata cache.`);
 
       const results: Record<string, Tags> = {};
       const distinctFilePathsToProcess = new Set<string>();
@@ -287,7 +291,8 @@ export class ImagePipelineEngine {
         throw new DOMException("Aborted", "AbortError");
 
       const startTime = Date.now();
-      await this.loadCache();
+      if (!this.embeddingCache) await this.loadEmbeddingCache();
+      if (!this.embeddingCache) throw Error(`[astro-image-pipeline] Failed to load embedding cache.`);
 
       const results: Record<string, number[]> = {};
       const distinctFilePathsToProcess = new Set<string>();
@@ -365,6 +370,7 @@ export class ImagePipelineEngine {
           currentBatchFilePaths.forEach((filePath, index) => {
             const vector = vectors[index];
             const key = filePathsToKey[filePath];
+            if (!this.embeddingCache) throw Error(`[astro-image-pipeline] Embedding cache not initialized.`);
             this.embeddingCache[key] = vector;
             results[filePath] = vector;
           });
