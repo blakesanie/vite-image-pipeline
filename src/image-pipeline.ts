@@ -7,12 +7,19 @@ import { existsSync } from "fs";
 import path from "path";
 import sharp from "sharp";
 
+export interface CacheEntry<T> {
+  mtime: number;
+  size: number;
+  hash: string;
+  data: T;
+}
+
 export interface MetadataCacheSchema {
-  [fileSha: string]: { [key: string]: any };
+  [filePath: string]: CacheEntry<Tags>;
 }
 
 export interface EmbeddingCacheSchema {
-  [fileSha: string]: number[];
+  [filePath: string]: CacheEntry<number[]>;
 }
 
 let globalPipelinePromise: Promise<any> | null = null;
@@ -56,10 +63,12 @@ export class ImagePipelineEngine {
       try {
         const raw = await fs.readFile(this.metadataCachePath, "utf-8");
         this.metadataCache = JSON.parse(raw);
+        return;
       } catch (e) {
-        this.metadataCache = {};
+        console.error(`[astro-image-pipeline] Failed to load metadata cache at ${this.metadataCachePath}.`, e);
       }
     }
+    this.metadataCache = {};
   }
 
   private async loadEmbeddingCache() {
@@ -67,10 +76,12 @@ export class ImagePipelineEngine {
       try {
         const raw = await fs.readFile(this.embeddingCachePath, "utf-8");
         this.embeddingCache = JSON.parse(raw);
+        return;
       } catch (e) {
-        this.embeddingCache = {};
+        console.error(`[astro-image-pipeline] Failed to load embedding cache at ${this.embeddingCachePath}.`, e);
       }
     }
+    this.embeddingCache = {};
   }
 
   public async getPipeline() {
@@ -97,19 +108,16 @@ export class ImagePipelineEngine {
       })();
     }
     this.visionPipeline = await globalPipelinePromise;
-    console.log(`[astro-image-pipeline] Image embedding pipeline loaded.`)
+    console.log(`[astro-image-pipeline] Image embedding pipeline loaded.`);
     return this.visionPipeline;
   }
 
-  private async getFileHash(filePath: string): Promise<string> {
+  private async getFileStatsAndHash(filePath: string): Promise<{ size: number; mtime: number; hash: string }> {
     try {
       const stat = await fs.stat(filePath);
-
-      // 1. Get size and modified time (mtime Ms)
       const size = stat.size;
       const mtime = stat.mtimeMs;
 
-      // 2. Sample the first 4KB of the file to catch quick internal edits
       const sampleSize = Math.min(size, 4096);
       const handle = await fs.open(filePath, "r");
       const buffer = Buffer.alloc(sampleSize);
@@ -117,13 +125,11 @@ export class ImagePipelineEngine {
       await handle.read(buffer, 0, sampleSize, 0);
       await handle.close();
 
-      // 3. Create a composite key using a fast algorithm (xxhash or md5)
-      // We use md5 here purely as a fast non-cryptographic checksum
       const sampleHash = crypto.createHash("md5").update(buffer).digest("hex");
 
-      return `${size}_${mtime}_${sampleHash}`;
+      return { size, mtime, hash: sampleHash };
     } catch (err) {
-      console.error(`[astro-image-pipeline] Failed to generate fast hash for ${filePath}:`, err);
+      console.error(`[astro-image-pipeline] Failed to generate stats and hash for ${filePath}:`, err);
       throw err;
     }
   }
@@ -138,18 +144,13 @@ export class ImagePipelineEngine {
       );
       console.log(`[astro-image-pipeline] Metadata cache written to ${this.metadataCachePath} for ${Object.keys(this.metadataCache || {}).length} items.`);
     } catch (err) {
-      console.error(
-        "[astro-image-pipeline] Failed to sync metadata cache:",
-        err,
-      );
+      console.error("[astro-image-pipeline] Failed to sync metadata cache:", err);
     }
   }
 
   private async saveEmbeddingCache() {
     try {
-      await fs.mkdir(path.dirname(this.embeddingCachePath), {
-        recursive: true,
-      });
+      await fs.mkdir(path.dirname(this.embeddingCachePath), { recursive: true });
       await fs.writeFile(
         this.embeddingCachePath,
         JSON.stringify(this.embeddingCache, null, 2),
@@ -157,10 +158,7 @@ export class ImagePipelineEngine {
       );
       console.log(`[astro-image-pipeline] Embedding cache written to ${this.embeddingCachePath} for ${Object.keys(this.embeddingCache || {}).length} items.`);
     } catch (err) {
-      console.error(
-        "[astro-image-pipeline] Failed to sync embedding cache:",
-        err,
-      );
+      console.error("[astro-image-pipeline] Failed to sync embedding cache:", err);
     }
   }
 
@@ -171,10 +169,8 @@ export class ImagePipelineEngine {
     const currentLock = this.metadataLock.catch(() => { });
     const executionPromise = (async () => {
       await currentLock;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
+      if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-      const startTime = Date.now();
       if (!this.metadataCache) await this.loadMetadataCache();
       if (!this.metadataCache) throw Error(`[astro-image-pipeline] Failed to load metadata cache.`);
 
@@ -182,30 +178,34 @@ export class ImagePipelineEngine {
       const distinctFilePathsToProcess = new Set<string>();
       let cacheHits = 0;
 
-      const absolutePaths: Record<string, string> = {};
-      for (const filePath of filePaths) {
-        absolutePaths[filePath] = path.resolve(path.join(process.cwd(), filePath));
-      }
-
-      const filePathToKey = new Map()
-      await Promise.all(filePaths.map((async (filePath) => {
-        const absolutePath = absolutePaths[filePath];
-        const key = `${filePath}#${await this.getFileHash(absolutePath)}`;
-        filePathToKey.set(filePath, key);
-      })))
+      // Map out metadata descriptors up front safely
+      const fileDescriptors: Record<string, { absolutePath: string; size: number; mtime: number; hash: string }> = {};
+      await Promise.all(
+        filePaths.map(async (filePath) => {
+          const absolutePath = path.resolve(path.join(process.cwd(), filePath));
+          const stats = await this.getFileStatsAndHash(absolutePath);
+          fileDescriptors[filePath] = { absolutePath, ...stats };
+        })
+      );
 
       for (const filePath of filePaths) {
-        const key = filePathToKey.get(filePath);
-        const cached = this.metadataCache[key];
-        if (cached) {
-          results[filePath] = cached;
+        const cached = this.metadataCache[filePath];
+        const current = fileDescriptors[filePath];
+
+        if (
+          cached &&
+          cached.mtime === current.mtime &&
+          cached.size === current.size &&
+          cached.hash === current.hash
+        ) {
+          results[filePath] = cached.data;
           cacheHits++;
-          continue;
+        } else {
+          distinctFilePathsToProcess.add(filePath);
         }
-        distinctFilePathsToProcess.add(filePath);
       }
 
-      console.log("Metadata cache hits:", cacheHits, "/", filePaths.length);
+      console.log("[astro-image-pipeline] Metadata cache hits:", cacheHits, "/", filePaths.length);
 
       if (distinctFilePathsToProcess.size === 0) {
         return results;
@@ -215,19 +215,25 @@ export class ImagePipelineEngine {
       const FLUSH_INTERVAL = 10;
 
       for (const filePath of distinctFilePathsToProcess) {
-        // 🛑 Stop immediately if client aborted connection
         if (options?.signal?.aborted) {
           if (processedSinceLastSave > 0) await this.saveMetadataCache();
           throw new DOMException("Aborted", "AbortError");
         }
 
         try {
-          const absolutePath = absolutePaths[filePath];
-          const tags = await exiftool.read(absolutePath);
-          const key = filePathToKey.get(filePath);
-          this.metadataCache[key] = tags;
+          const descriptor = fileDescriptors[filePath];
+          const tags = await exiftool.read(descriptor.absolutePath);
+
+          this.metadataCache[filePath] = {
+            mtime: descriptor.mtime,
+            size: descriptor.size,
+            hash: descriptor.hash,
+            data: tags
+          };
+
           results[filePath] = tags;
           processedSinceLastSave++;
+
           if (processedSinceLastSave >= FLUSH_INTERVAL) {
             await this.saveMetadataCache();
             processedSinceLastSave = 0;
@@ -242,43 +248,8 @@ export class ImagePipelineEngine {
     })();
 
     this.metadataLock = executionPromise;
-    const results = await executionPromise;
-    return results;
+    return await executionPromise;
   }
-
-  // private async processFileHashesBatch(
-  //   filePaths: string[],
-  //   cacheCheckFn: (sha: string) => any,
-  //   onCacheHit: (absolutePath: string, cachedData: any) => void,
-  //   onCacheMiss: (sha: string, absolutePath: string) => void,
-  //   batchSize = 1,
-  // ): Promise<void> {
-  //   const processedPaths = new Set<string>();
-  //   let n = Math.ceil(filePaths.length / batchSize);
-  //   for (let i = 0; i < filePaths.length; i += batchSize) {
-  //     const batchPaths = filePaths.slice(i, i + batchSize);
-  //     await Promise.all(
-  //       batchPaths.map(async (rawPath) => {
-  //         if (processedPaths.has(rawPath)) return;
-  //         processedPaths.add(rawPath);
-  //         const absolutePath = path.resolve(rawPath);
-  //         if (!existsSync(absolutePath)) return;
-  //         try {
-  //           const sha = await this.getFileHash(absolutePath);
-  //           const cachedItem = cacheCheckFn(sha);
-  //           if (cachedItem) onCacheHit(absolutePath, cachedItem);
-  //           else onCacheMiss(sha, absolutePath);
-  //         } catch (hashErr) {
-  //           console.error(
-  //             `[astro-image-pipeline] Failed hashing target ${rawPath}:`,
-  //             hashErr,
-  //           );
-  //         }
-  //       }),
-  //     );
-  //     console.log("Finished SHA calculation batch", i / batchSize + 1, "of", n);
-  //   }
-  // }
 
   public async getEmbeddings(
     filePaths: string[],
@@ -287,10 +258,8 @@ export class ImagePipelineEngine {
     const currentLock = this.embeddingLock.catch(() => { });
     const executionPromise = (async () => {
       await currentLock;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
+      if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-      const startTime = Date.now();
       if (!this.embeddingCache) await this.loadEmbeddingCache();
       if (!this.embeddingCache) throw Error(`[astro-image-pipeline] Failed to load embedding cache.`);
 
@@ -298,28 +267,31 @@ export class ImagePipelineEngine {
       const distinctFilePathsToProcess = new Set<string>();
       let cacheHits = 0;
 
-      const absolutePaths: Record<string, string> = {};
-      for (const filePath of filePaths) {
-        absolutePaths[filePath] = path.resolve(path.join(process.cwd(), filePath));
-      }
-
-      const filePathsToKey: Record<string, string> = {};
-
-      await Promise.all(filePaths.map(async (filePath) => {
-        const absolutePath = absolutePaths[filePath];
-        const key = `${filePath}#${await this.getFileHash(absolutePath)}`;
-        filePathsToKey[filePath] = key;
-      }))
+      // Gather current system states for processing up front
+      const fileDescriptors: Record<string, { absolutePath: string; size: number; mtime: number; hash: string }> = {};
+      await Promise.all(
+        filePaths.map(async (filePath) => {
+          const absolutePath = path.resolve(path.join(process.cwd(), filePath));
+          const stats = await this.getFileStatsAndHash(absolutePath);
+          fileDescriptors[filePath] = { absolutePath, ...stats };
+        })
+      );
 
       for (const filePath of filePaths) {
-        const key = filePathsToKey[filePath];
-        const cached = this.embeddingCache[key];
-        if (cached) {
-          results[filePath] = cached;
+        const cached = this.embeddingCache[filePath];
+        const current = fileDescriptors[filePath];
+
+        if (
+          cached &&
+          cached.mtime === current.mtime &&
+          cached.size === current.size &&
+          cached.hash === current.hash
+        ) {
+          results[filePath] = cached.data;
           cacheHits++;
-          continue;
+        } else {
+          distinctFilePathsToProcess.add(filePath);
         }
-        distinctFilePathsToProcess.add(filePath);
       }
 
       console.log(`[astro-image-pipeline] Embedding cache hits: ${cacheHits} / ${filePaths.length}.`);
@@ -333,31 +305,22 @@ export class ImagePipelineEngine {
       const totalBatches = Math.ceil(pendingFilePaths.length / this.ML_BATCH_SIZE);
 
       for (let i = 0; i < pendingFilePaths.length; i += this.ML_BATCH_SIZE) {
-        // 🛑 Stop inference batches if client closed connection
         if (options?.signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
 
-        const currentBatchFilePaths = pendingFilePaths.slice(
-          i,
-          i + this.ML_BATCH_SIZE,
-        );
+        const currentBatchFilePaths = pendingFilePaths.slice(i, i + this.ML_BATCH_SIZE);
         try {
           const imageBuffers = await Promise.all(
             currentBatchFilePaths.map(async (filePath) => {
-              const absolutePath = absolutePaths[filePath];
-              const { data, info } = await sharp(absolutePath)
+              const descriptor = fileDescriptors[filePath];
+              const { data, info } = await sharp(descriptor.absolutePath)
                 .resize(224, 224, { fit: "fill" })
                 .removeAlpha()
                 .raw()
                 .toBuffer({ resolveWithObject: true });
 
-              return new RawImage(
-                new Uint8Array(data),
-                info.width,
-                info.height,
-                3,
-              );
+              return new RawImage(new Uint8Array(data), info.width, info.height, 3);
             }),
           );
 
@@ -366,42 +329,46 @@ export class ImagePipelineEngine {
             normalize: true,
           });
 
-          const vectors = outputs.map((output: any) => Array.from(output.data) as number[]);
+          const [batchSize, embeddingDim] = outputs.dims;
+          const flatData = outputs.data;
+
           currentBatchFilePaths.forEach((filePath, index) => {
-            const vector = vectors[index];
-            const key = filePathsToKey[filePath];
+            const start = index * embeddingDim;
+            const end = start + embeddingDim;
+            const vector = Array.from(flatData.subarray(start, end)) as number[];
+
+            const descriptor = fileDescriptors[filePath];
             if (!this.embeddingCache) throw Error(`[astro-image-pipeline] Embedding cache not initialized.`);
-            this.embeddingCache[key] = vector;
+
+            this.embeddingCache[filePath] = {
+              mtime: descriptor.mtime,
+              size: descriptor.size,
+              hash: descriptor.hash,
+              data: vector
+            };
             results[filePath] = vector;
           });
 
-          console.log(`[astro-image-pipeline] Completed embedding generation for batch ${i / this.ML_BATCH_SIZE + 1} of ${totalBatches}.`)
+          console.log(`[astro-image-pipeline] Completed embedding generation for batch ${i / this.ML_BATCH_SIZE + 1} of ${totalBatches}.`);
 
           await this.saveEmbeddingCache();
         } catch (err) {
-          console.error(
-            `[astro-image-pipeline] ML Inference Batch Failure:`,
-            err,
-          );
+          console.error(`[astro-image-pipeline] ML Inference Batch Failure:`, err);
         }
       }
       return results;
     })();
 
     this.embeddingLock = executionPromise;
-    const results = await executionPromise;
-    return results;
+    return await executionPromise;
   }
 
   public async shutdown() {
-    // 1. Terminate the background ExifTool process cleanly
     try {
       await exiftool.end();
     } catch (e) {
-      // Prevent unhandled rejections during close steps
+      // Catch quiet drop
     }
-
-    // 2. Kill the vision pipeline context references so the event loop can clear
     if (this.visionPipeline) {
       this.visionPipeline = null;
       globalPipelinePromise = null;
