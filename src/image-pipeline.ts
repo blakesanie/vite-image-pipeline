@@ -22,26 +22,45 @@ export interface EmbeddingCacheSchema {
   [filePath: string]: CacheEntry<number[]>;
 }
 
+// ─── NEW SCHEMA SCHEMAS ─────────────────────────────────────────────
+export interface ColorCacheSchema {
+  [filePath: string]: CacheEntry<{ r: number; g: number; b: number }>;
+}
+
+export interface BlurCacheSchema {
+  [filePath: string]: CacheEntry<string>; // Base64 Data URI string
+}
+
 let globalPipelinePromise: Promise<any> | null = null;
 
 export class ImagePipelineEngine {
   private metadataCachePath: string;
   private embeddingCachePath: string;
+  private colorCachePath: string;
+  private blurCachePath: string;
   private modelCachePath: string;
+
   private metadataCache: MetadataCacheSchema | null = null;
   private embeddingCache: EmbeddingCacheSchema | null = null;
+  private colorCache: ColorCacheSchema | null = null;
+  private blurCache: BlurCacheSchema | null = null;
+
   private modelName: string;
   private visionPipeline: any = null;
   private ML_BATCH_SIZE: number;
 
   private metadataLock: Promise<any> = Promise.resolve();
   private embeddingLock: Promise<any> = Promise.resolve();
+  private colorLock: Promise<any> = Promise.resolve();
+  private blurLock: Promise<any> = Promise.resolve();
 
   constructor(
     options: {
       modelName?: string;
       metadataCachePath?: string;
       embeddingCachePath?: string;
+      colorCachePath?: string;
+      blurCachePath?: string;
       batchSize?: number;
       modelCachePath?: string;
     } = {},
@@ -53,6 +72,11 @@ export class ImagePipelineEngine {
     this.embeddingCachePath =
       options.embeddingCachePath ||
       path.resolve(".image-pipeline/embedding-cache.json");
+    this.colorCachePath =
+      options.colorCachePath ||
+      path.resolve(".image-pipeline/color-cache.json");
+    this.blurCachePath =
+      options.blurCachePath || path.resolve(".image-pipeline/blur-cache.json");
     this.ML_BATCH_SIZE = options.batchSize || 4;
     this.modelCachePath =
       options.modelCachePath || path.resolve(".image-pipeline/models");
@@ -90,6 +114,52 @@ export class ImagePipelineEngine {
     this.embeddingCache = {};
   }
 
+  private async loadColorCache() {
+    if (existsSync(this.colorCachePath)) {
+      try {
+        const raw = await fs.readFile(this.colorCachePath, "utf-8");
+        this.colorCache = JSON.parse(raw);
+        return;
+      } catch (e) {
+        console.error(
+          `[astro-image-pipeline] Failed to load color cache at ${this.colorCachePath}.`,
+          e,
+        );
+      }
+    }
+    this.colorCache = {};
+  }
+
+  private async loadBlurCache() {
+    if (existsSync(this.blurCachePath)) {
+      try {
+        const raw = await fs.readFile(this.blurCachePath, "utf-8");
+        this.blurCache = JSON.parse(raw);
+        return;
+      } catch (e) {
+        console.error(
+          `[astro-image-pipeline] Failed to load blur cache at ${this.blurCachePath}.`,
+          e,
+        );
+      }
+    }
+    this.blurCache = {};
+  }
+
+  private resolveToAbsolutePath(filePath: string): string {
+    let cleanPath = filePath.split("?")[0];
+    if (cleanPath.startsWith("/@fs")) {
+      cleanPath = cleanPath.replace("/@fs", "");
+    }
+    const isProjectRelative = cleanPath.startsWith("/src/");
+    const isAbsolute =
+      !isProjectRelative &&
+      (cleanPath.startsWith("/Users/") || path.isAbsolute(cleanPath));
+    return isAbsolute
+      ? cleanPath
+      : path.resolve(path.join(process.cwd(), cleanPath));
+  }
+
   public async getPipeline() {
     if (this.visionPipeline) return this.visionPipeline;
     if (!globalPipelinePromise) {
@@ -122,12 +192,14 @@ export class ImagePipelineEngine {
     filePath: string,
   ): Promise<{ size: number; mtime: number; hash: string }> {
     try {
-      const stat = await fs.stat(filePath);
+      // Clean up string mutations mimicking the Astro component loader
+      const targetPath = this.resolveToAbsolutePath(filePath);
+      const stat = await fs.stat(targetPath);
       const size = stat.size;
       const mtime = stat.mtimeMs;
 
       const sampleSize = Math.min(size, 4096);
-      const handle = await fs.open(filePath, "r");
+      const handle = await fs.open(targetPath, "r");
       const buffer = Buffer.alloc(sampleSize);
 
       await handle.read(buffer, 0, sampleSize, 0);
@@ -153,9 +225,6 @@ export class ImagePipelineEngine {
         JSON.stringify(this.metadataCache, null, 2),
         "utf-8",
       );
-      console.log(
-        `[astro-image-pipeline] Metadata cache written to ${this.metadataCachePath} for ${Object.keys(this.metadataCache || {}).length} items.`,
-      );
     } catch (err) {
       console.error(
         "[astro-image-pipeline] Failed to sync metadata cache:",
@@ -174,9 +243,6 @@ export class ImagePipelineEngine {
         JSON.stringify(this.embeddingCache, null, 2),
         "utf-8",
       );
-      console.log(
-        `[astro-image-pipeline] Embedding cache written to ${this.embeddingCachePath} for ${Object.keys(this.embeddingCache || {}).length} items.`,
-      );
     } catch (err) {
       console.error(
         "[astro-image-pipeline] Failed to sync embedding cache:",
@@ -185,6 +251,203 @@ export class ImagePipelineEngine {
     }
   }
 
+  private async saveColorCache() {
+    try {
+      await fs.mkdir(path.dirname(this.colorCachePath), { recursive: true });
+      await fs.writeFile(
+        this.colorCachePath,
+        JSON.stringify(this.colorCache, null, 2),
+        "utf-8",
+      );
+    } catch (err) {
+      console.error("[astro-image-pipeline] Failed to sync color cache:", err);
+    }
+  }
+
+  private async saveBlurCache() {
+    try {
+      await fs.mkdir(path.dirname(this.blurCachePath), { recursive: true });
+      await fs.writeFile(
+        this.blurCachePath,
+        JSON.stringify(this.blurCache, null, 2),
+        "utf-8",
+      );
+    } catch (err) {
+      console.error("[astro-image-pipeline] Failed to sync blur cache:", err);
+    }
+  }
+
+  // ─── GET DOMINANT COLORS METRIC (PARALLELIZED) ────────────────────
+  public async getImageColors(
+    filePaths: string[],
+    options?: { signal?: AbortSignal },
+  ): Promise<Record<string, { r: number; g: number; b: number }>> {
+    const currentLock = this.colorLock.catch(() => {});
+    const executionPromise = (async () => {
+      await currentLock;
+      if (options?.signal?.aborted)
+        throw new DOMException("Aborted", "AbortError");
+
+      const [, ...fileDescriptorsArray] = await Promise.all([
+        this.colorCache ? Promise.resolve() : this.loadColorCache(),
+        ...filePaths.map(async (filePath) => {
+          const stats = await this.getFileStatsAndHash(filePath);
+          return { filePath, ...stats };
+        }),
+      ]);
+
+      if (!this.colorCache)
+        throw Error(`[astro-image-pipeline] Failed to load color cache.`);
+
+      const results: Record<string, { r: number; g: number; b: number }> = {};
+      const distinctDescriptorsToProcess: typeof fileDescriptorsArray = [];
+      let cacheHits = 0;
+
+      for (const desc of fileDescriptorsArray) {
+        const cached = this.colorCache[desc.filePath];
+        if (
+          cached &&
+          cached.mtime === desc.mtime &&
+          cached.size === desc.size &&
+          cached.hash === desc.hash
+        ) {
+          results[desc.filePath] = cached.data;
+          cacheHits++;
+        } else {
+          distinctDescriptorsToProcess.push(desc);
+        }
+      }
+
+      if (distinctDescriptorsToProcess.length === 0) return results;
+      if (options?.signal?.aborted)
+        throw new DOMException("Aborted", "AbortError");
+
+      await Promise.all(
+        distinctDescriptorsToProcess.map(async (desc) => {
+          try {
+            const sharpInstance = sharp(
+              this.resolveToAbsolutePath(desc.filePath),
+            );
+            const { dominant } = await sharpInstance.stats();
+            const payload = { r: dominant.r, g: dominant.g, b: dominant.b };
+
+            this.colorCache![desc.filePath] = {
+              mtime: desc.mtime,
+              size: desc.size,
+              hash: desc.hash,
+              data: payload,
+            };
+            results[desc.filePath] = payload;
+          } catch (err) {
+            console.error(
+              `[astro-image-pipeline] Color Generation Failure for ${desc.filePath}:`,
+              err,
+            );
+          }
+        }),
+      );
+
+      await this.saveColorCache();
+      return results;
+    })();
+
+    this.colorLock = executionPromise;
+    return await executionPromise;
+  }
+
+  // ─── GET BLUR PLACEHOLDERS METRIC (PARALLELIZED) ──────────────────
+  public async getImageBlurPlaceholders(
+    filePaths: string[],
+    options?: { signal?: AbortSignal },
+  ): Promise<Record<string, string>> {
+    const currentLock = this.blurLock.catch(() => {});
+    const executionPromise = (async () => {
+      await currentLock;
+      if (options?.signal?.aborted)
+        throw new DOMException("Aborted", "AbortError");
+
+      const [, ...fileDescriptorsArray] = await Promise.all([
+        this.blurCache ? Promise.resolve() : this.loadBlurCache(),
+        ...filePaths.map(async (filePath) => {
+          const stats = await this.getFileStatsAndHash(filePath);
+          return { filePath, ...stats };
+        }),
+      ]);
+
+      if (!this.blurCache)
+        throw Error(`[astro-image-pipeline] Failed to load blur cache.`);
+
+      const results: Record<string, string> = {};
+      const distinctDescriptorsToProcess: typeof fileDescriptorsArray = [];
+      let cacheHits = 0;
+
+      for (const desc of fileDescriptorsArray) {
+        const cached = this.blurCache[desc.filePath];
+        if (
+          cached &&
+          cached.mtime === desc.mtime &&
+          cached.size === desc.size &&
+          cached.hash === desc.hash
+        ) {
+          results[desc.filePath] = cached.data;
+          cacheHits++;
+        } else {
+          distinctDescriptorsToProcess.push(desc);
+        }
+      }
+
+      if (distinctDescriptorsToProcess.length === 0) return results;
+      if (options?.signal?.aborted)
+        throw new DOMException("Aborted", "AbortError");
+
+      await Promise.all(
+        distinctDescriptorsToProcess.map(async (desc) => {
+          try {
+            const sharpInstance = sharp(
+              this.resolveToAbsolutePath(desc.filePath),
+            );
+
+            const buffer = await sharpInstance.resize(20).blur(1).toBuffer();
+            const base64 = buffer.toString("base64");
+
+            // Infer simple fallback MIME type extensions cleanly
+            const ext = path
+              .extname(desc.filePath)
+              .toLowerCase()
+              .replace(".", "");
+            const mimeType =
+              ext === "png"
+                ? "image/png"
+                : ext === "webp"
+                  ? "image/webp"
+                  : "image/jpeg";
+            const dataUri = `data:${mimeType};base64,${base64}`;
+
+            this.blurCache![desc.filePath] = {
+              mtime: desc.mtime,
+              size: desc.size,
+              hash: desc.hash,
+              data: dataUri,
+            };
+            results[desc.filePath] = dataUri;
+          } catch (err) {
+            console.error(
+              `[astro-image-pipeline] Blur Generation Failure for ${desc.filePath}:`,
+              err,
+            );
+          }
+        }),
+      );
+
+      await this.saveBlurCache();
+      return results;
+    })();
+
+    this.blurLock = executionPromise;
+    return await executionPromise;
+  }
+
+  // ─── UNTOUCHED PRE-EXISTING PIPELINE LOGIC ────────────────────────
   public async getMetadata(
     filePaths: string[],
     options?: { signal?: AbortSignal },
@@ -198,9 +461,8 @@ export class ImagePipelineEngine {
       if (!this.metadataCache) await this.loadMetadataCache();
       const [, ...fileDescriptorsArray] = await Promise.all([
         ...filePaths.map(async (filePath) => {
-          const absolutePath = path.resolve(path.join(process.cwd(), filePath));
-          const stats = await this.getFileStatsAndHash(absolutePath);
-          return { filePath, absolutePath, ...stats };
+          const stats = await this.getFileStatsAndHash(filePath);
+          return { filePath, ...stats };
         }),
       ]);
 
@@ -212,7 +474,6 @@ export class ImagePipelineEngine {
       const distinctDescriptorsToProcess: typeof fileDescriptorsArray = [];
       let cacheHits = 0;
 
-      // Evaluate entire cache block synchronously in one pass
       for (const desc of fileDescriptorsArray) {
         const cached = this.metadataCache[desc.filePath];
         if (
@@ -238,18 +499,15 @@ export class ImagePipelineEngine {
         filePaths.length,
       );
 
-      if (distinctDescriptorsToProcess.length === 0) {
-        return results;
-      }
-
+      if (distinctDescriptorsToProcess.length === 0) return results;
       if (options?.signal?.aborted)
         throw new DOMException("Aborted", "AbortError");
 
-      // Process all Exif extractions concurrently via Promise.all
       await Promise.all(
         distinctDescriptorsToProcess.map(async (desc) => {
           try {
-            const tags = await exiftool.read(desc.absolutePath);
+            const cleanPath = desc.filePath.split("?")[0].replace("/@fs", "");
+            const tags = await exiftool.read(cleanPath);
             this.metadataCache![desc.filePath] = {
               mtime: desc.mtime,
               size: desc.size,
@@ -284,13 +542,11 @@ export class ImagePipelineEngine {
       if (options?.signal?.aborted)
         throw new DOMException("Aborted", "AbortError");
 
-      // Bootstrapping cache loads and hashing files concurrently
       const [, ...fileDescriptorsArray] = await Promise.all([
         this.embeddingCache ? Promise.resolve() : this.loadEmbeddingCache(),
         ...filePaths.map(async (filePath) => {
-          const absolutePath = path.resolve(path.join(process.cwd(), filePath));
-          const stats = await this.getFileStatsAndHash(absolutePath);
-          return { filePath, absolutePath, ...stats };
+          const stats = await this.getFileStatsAndHash(filePath);
+          return { filePath, ...stats };
         }),
       ]);
 
@@ -324,17 +580,13 @@ export class ImagePipelineEngine {
         `[astro-image-pipeline] Embedding cache hits: ${cacheHits} / ${filePaths.length}.`,
       );
 
-      if (distinctDescriptorsToProcess.length === 0) {
-        return results;
-      }
+      if (distinctDescriptorsToProcess.length === 0) return results;
 
       const extractor = await this.getPipeline();
       const totalBatches = Math.ceil(
         distinctDescriptorsToProcess.length / this.ML_BATCH_SIZE,
       );
 
-      // Model inference steps are kept sequential to protect memory/CPU limits,
-      // but internal processing steps are highly parallelized.
       for (
         let i = 0;
         i < distinctDescriptorsToProcess.length;
@@ -348,10 +600,10 @@ export class ImagePipelineEngine {
           i + this.ML_BATCH_SIZE,
         );
         try {
-          // Parallel processing of image transformations via Sharp
           const imageBuffers = await Promise.all(
             currentBatch.map(async (desc) => {
-              const { data, info } = await sharp(desc.absolutePath)
+              const cleanPath = desc.filePath.split("?")[0].replace("/@fs", "");
+              const { data, info } = await sharp(cleanPath)
                 .resize(224, 224, { fit: "fill" })
                 .removeAlpha()
                 .raw()
@@ -370,7 +622,6 @@ export class ImagePipelineEngine {
             pooling: "mean",
             normalize: true,
           });
-
           const [, embeddingDim] = outputs.dims;
           const flatData = outputs.data;
 
@@ -412,9 +663,7 @@ export class ImagePipelineEngine {
   public async shutdown() {
     try {
       await exiftool.end();
-    } catch (e) {
-      // Quiet close
-    }
+    } catch (e) {}
     if (this.visionPipeline) {
       this.visionPipeline = null;
       globalPipelinePromise = null;

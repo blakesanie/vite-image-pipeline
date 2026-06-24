@@ -1,3 +1,4 @@
+// astro.ts
 import type { AstroIntegration } from "astro";
 import path from "path";
 import { ImagePipelineEngine } from "../image-pipeline.js";
@@ -18,20 +19,26 @@ const getEngine = () => {
   if (!globalPipelineInstance) {
     globalPipelineInstance = new ImagePipelineEngine({
       modelName: savedPluginOptions?.modelName,
+      batchSize: savedPluginOptions?.batchSize,
       metadataCachePath: path.resolve(
         ".astro/astro-image-pipeline/metadata-cache.json",
       ),
       embeddingCachePath: path.resolve(
         ".astro/astro-image-pipeline/embedding-cache.json",
       ),
-      batchSize: savedPluginOptions?.batchSize,
+      colorCachePath: path.resolve(
+        ".astro/astro-image-pipeline/color-cache.json",
+      ),
+      blurCachePath: path.resolve(
+        ".astro/astro-image-pipeline/blur-cache.json",
+      ),
       modelCachePath: path.resolve(".astro/astro-image-pipeline/models"),
     });
   }
   return globalPipelineInstance;
 };
 
-// Lazily initialized when called by pages
+// Lazily initialized when called by pages / components
 export async function getImageMetadata(
   filePaths: string[],
   options?: RunOptions,
@@ -39,12 +46,28 @@ export async function getImageMetadata(
   return getEngine().getMetadata(filePaths, options);
 }
 
-// Lazily initialized when called by pages
+// Lazily initialized when called by pages / components
 export async function getImageEmbeddings(
   filePaths: string[],
   options?: RunOptions,
 ) {
   return getEngine().getEmbeddings(filePaths, options);
+}
+
+// Lazily initialized when called by pages / components
+export async function getImageColors(
+  filePaths: string[],
+  options?: RunOptions,
+) {
+  return getEngine().getImageColors(filePaths, options);
+}
+
+// Lazily initialized when called by pages / components
+export async function getImageBlurPlaceholders(
+  filePaths: string[],
+  options?: RunOptions,
+) {
+  return getEngine().getImageBlurPlaceholders(filePaths, options);
 }
 
 export default function imagePipeline(
