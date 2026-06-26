@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "description": "",
   "type": "module",
-  "main": "./dist/plugins/astro.js",
-  "types": "./dist/plugins/astro.d.ts",
+  "main": "./dist/image-pipeline.js",
+  "types": "./dist/image-pipeline.d.ts",
   "files": [
     "dist"
   ],

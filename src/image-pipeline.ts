@@ -6,34 +6,66 @@ import fs from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
 import sharp from "sharp";
+import type { AstroIntegration } from "astro";
 
-export interface CacheEntry<T> {
+interface CacheEntry<T> {
   mtime: number;
   size: number;
   hash: string;
   data: T;
 }
 
-export interface MetadataCacheSchema {
+interface MetadataCacheSchema {
   [filePath: string]: CacheEntry<Tags>;
 }
 
-export interface EmbeddingCacheSchema {
+interface EmbeddingCacheSchema {
   [filePath: string]: CacheEntry<number[]>;
 }
 
 // ─── NEW SCHEMA SCHEMAS ─────────────────────────────────────────────
-export interface ColorCacheSchema {
+interface ColorCacheSchema {
   [filePath: string]: CacheEntry<{ r: number; g: number; b: number }>;
 }
 
-export interface BlurCacheSchema {
+interface BlurCacheSchema {
   [filePath: string]: CacheEntry<string>; // Base64 Data URI string
 }
 
-let globalPipelinePromise: Promise<any> | null = null;
+export interface ImagePipelineOptions {
+  modelName?: string;
+  metadataCachePath?: string;
+  embeddingCachePath?: string;
+  colorCachePath?: string;
+  blurCachePath?: string;
+  batchSize?: number;
+  modelCachePath?: string;
+}
 
-export class ImagePipelineEngine {
+let configuredOptions: ImagePipelineOptions | null = null;
+
+let globalPipelineInstance: ImagePipelineEngine | null = null;
+
+export default function ImagePipeline(options: ImagePipelineOptions = {}) {
+  if (!globalPipelineInstance) {
+    const finalOptions = {
+      ...configuredOptions,
+      ...options
+    };
+    globalPipelineInstance = new ImagePipelineEngine(finalOptions);
+  }
+  return globalPipelineInstance;
+}
+
+async function stop() {
+  if (globalPipelineInstance) {
+    await globalPipelineInstance.shutdown();
+    globalPipelineInstance = null;
+  }
+}
+
+
+class ImagePipelineEngine {
   private metadataCachePath: string;
   private embeddingCachePath: string;
   private colorCachePath: string;
@@ -55,15 +87,7 @@ export class ImagePipelineEngine {
   private blurLock: Promise<any> = Promise.resolve();
 
   constructor(
-    options: {
-      modelName?: string;
-      metadataCachePath?: string;
-      embeddingCachePath?: string;
-      colorCachePath?: string;
-      blurCachePath?: string;
-      batchSize?: number;
-      modelCachePath?: string;
-    } = {},
+    options: ImagePipelineOptions = {},
   ) {
     this.modelName = options.modelName || "Xenova/clip-vit-base-patch32";
     this.metadataCachePath =
@@ -80,6 +104,16 @@ export class ImagePipelineEngine {
     this.ML_BATCH_SIZE = options.batchSize || 4;
     this.modelCachePath =
       options.modelCachePath || path.resolve(".image-pipeline/models");
+  }
+
+  public updateOptions(options: ImagePipelineOptions) {
+    if (options.metadataCachePath) this.metadataCachePath = options.metadataCachePath;
+    if (options.embeddingCachePath) this.embeddingCachePath = options.embeddingCachePath;
+    if (options.colorCachePath) this.colorCachePath = options.colorCachePath;
+    if (options.blurCachePath) this.blurCachePath = options.blurCachePath;
+    if (options.modelCachePath) this.modelCachePath = options.modelCachePath;
+    if (options.modelName) this.modelName = options.modelName;
+    if (options.batchSize) this.ML_BATCH_SIZE = options.batchSize;
   }
 
   private async loadMetadataCache() {
@@ -162,28 +196,26 @@ export class ImagePipelineEngine {
 
   public async getPipeline() {
     if (this.visionPipeline) return this.visionPipeline;
-    if (!globalPipelinePromise) {
-      globalPipelinePromise = (async () => {
-        env.useFSCache = true;
-        env.cacheDir = path.resolve(this.modelCachePath);
-        if (env.backends?.onnx?.wasm) {
-          env.backends.onnx.wasm.numThreads =
-            process.env.NODE_ENV === "production" ? 1 : 4;
-        }
-        env.allowLocalModels = true;
-        try {
-          return await pipeline("image-feature-extraction", this.modelName, {
-            device: "cpu",
-          });
-        } catch {
-          env.allowLocalModels = false;
-          return await pipeline("image-feature-extraction", this.modelName, {
-            device: "cpu",
-          });
-        }
-      })();
+
+    env.useFSCache = true;
+    env.cacheDir = path.resolve(this.modelCachePath);
+    if (env.backends?.onnx?.wasm) {
+      env.backends.onnx.wasm.numThreads =
+        process.env.NODE_ENV === "production" ? 1 : 4;
     }
-    this.visionPipeline = await globalPipelinePromise;
+    env.allowLocalModels = true;
+    try {
+      this.visionPipeline =
+        await pipeline("image-feature-extraction", this.modelName, {
+          device: "cpu",
+        });
+    } catch {
+      env.allowLocalModels = false;
+      this.visionPipeline =
+        await pipeline("image-feature-extraction", this.modelName, {
+          device: "cpu",
+        });
+    }
     console.log(`[astro-image-pipeline] Image embedding pipeline loaded.`);
     return this.visionPipeline;
   }
@@ -279,14 +311,11 @@ export class ImagePipelineEngine {
 
   // ─── GET DOMINANT COLORS METRIC (PARALLELIZED) ────────────────────
   public async getImageColors(
-    filePaths: string[],
-    options?: { signal?: AbortSignal },
+    filePaths: string[]
   ): Promise<Record<string, { r: number; g: number; b: number }>> {
-    const currentLock = this.colorLock.catch(() => {});
+    const currentLock = this.colorLock.catch(() => { });
     const executionPromise = (async () => {
       await currentLock;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
 
       const [, ...fileDescriptorsArray] = await Promise.all([
         this.colorCache ? Promise.resolve() : this.loadColorCache(),
@@ -319,8 +348,6 @@ export class ImagePipelineEngine {
       }
 
       if (distinctDescriptorsToProcess.length === 0) return results;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
 
       await Promise.all(
         distinctDescriptorsToProcess.map(async (desc) => {
@@ -358,13 +385,10 @@ export class ImagePipelineEngine {
   // ─── GET BLUR PLACEHOLDERS METRIC (PARALLELIZED) ──────────────────
   public async getImageBlurPlaceholders(
     filePaths: string[],
-    options?: { signal?: AbortSignal },
   ): Promise<Record<string, string>> {
-    const currentLock = this.blurLock.catch(() => {});
+    const currentLock = this.blurLock.catch(() => { });
     const executionPromise = (async () => {
       await currentLock;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
 
       const [, ...fileDescriptorsArray] = await Promise.all([
         this.blurCache ? Promise.resolve() : this.loadBlurCache(),
@@ -397,8 +421,6 @@ export class ImagePipelineEngine {
       }
 
       if (distinctDescriptorsToProcess.length === 0) return results;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
 
       await Promise.all(
         distinctDescriptorsToProcess.map(async (desc) => {
@@ -450,16 +472,13 @@ export class ImagePipelineEngine {
   // ─── UNTOUCHED PRE-EXISTING PIPELINE LOGIC ────────────────────────
   public async getMetadata(
     filePaths: string[],
-    options?: { signal?: AbortSignal },
   ): Promise<Record<string, Tags>> {
-    const currentLock = this.metadataLock.catch(() => {});
+    const currentLock = this.metadataLock.catch(() => { });
     const executionPromise = (async () => {
       await currentLock;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
 
       if (!this.metadataCache) await this.loadMetadataCache();
-      const [, ...fileDescriptorsArray] = await Promise.all([
+      const fileDescriptorsArray = await Promise.all([
         ...filePaths.map(async (filePath) => {
           const stats = await this.getFileStatsAndHash(filePath);
           return { filePath, ...stats };
@@ -498,15 +517,11 @@ export class ImagePipelineEngine {
         "/",
         filePaths.length,
       );
-
       if (distinctDescriptorsToProcess.length === 0) return results;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
-
       await Promise.all(
         distinctDescriptorsToProcess.map(async (desc) => {
           try {
-            const cleanPath = desc.filePath.split("?")[0].replace("/@fs", "");
+            const cleanPath = this.resolveToAbsolutePath(desc.filePath)
             const tags = await exiftool.read(cleanPath);
             this.metadataCache![desc.filePath] = {
               mtime: desc.mtime,
@@ -534,13 +549,10 @@ export class ImagePipelineEngine {
 
   public async getEmbeddings(
     filePaths: string[],
-    options?: { signal?: AbortSignal },
   ): Promise<Record<string, number[]>> {
-    const currentLock = this.embeddingLock.catch(() => {});
+    const currentLock = this.embeddingLock.catch(() => { });
     const executionPromise = (async () => {
       await currentLock;
-      if (options?.signal?.aborted)
-        throw new DOMException("Aborted", "AbortError");
 
       const [, ...fileDescriptorsArray] = await Promise.all([
         this.embeddingCache ? Promise.resolve() : this.loadEmbeddingCache(),
@@ -592,8 +604,6 @@ export class ImagePipelineEngine {
         i < distinctDescriptorsToProcess.length;
         i += this.ML_BATCH_SIZE
       ) {
-        if (options?.signal?.aborted)
-          throw new DOMException("Aborted", "AbortError");
 
         const currentBatch = distinctDescriptorsToProcess.slice(
           i,
@@ -602,7 +612,7 @@ export class ImagePipelineEngine {
         try {
           const imageBuffers = await Promise.all(
             currentBatch.map(async (desc) => {
-              const cleanPath = desc.filePath.split("?")[0].replace("/@fs", "");
+              const cleanPath = this.resolveToAbsolutePath(desc.filePath)
               const { data, info } = await sharp(cleanPath)
                 .resize(224, 224, { fit: "fill" })
                 .removeAlpha()
@@ -663,10 +673,20 @@ export class ImagePipelineEngine {
   public async shutdown() {
     try {
       await exiftool.end();
-    } catch (e) {}
+    } catch (e) { }
     if (this.visionPipeline) {
       this.visionPipeline = null;
-      globalPipelinePromise = null;
     }
   }
+}
+
+export function astroImagePipelinePlugin(): AstroIntegration {
+  return {
+    name: "image-pipeline",
+    hooks: {
+      "astro:build:generated": stop,
+      "astro:build:done": stop,
+      "astro:server:done": stop,
+    },
+  };
 }
