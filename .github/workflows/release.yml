@@ -1,74 +1,45 @@
-name: Release
+name: Publish to npm
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch: # Allows manual trigger from the GitHub Actions UI anytime
+  release:
+    types: [published]
 
-concurrency: ${{ github.workflow }}-${{ github.ref }}
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
-  release:
-    name: Release
+  publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write       # Required to create GitHub Releases and Git tags
-      pull-requests: write  # Required for Changesets to open/update version PRs
 
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          # Checkout the release tag
+          ref: ${{ github.event.release.tag_name }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 24
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: 22
+          registry-url: https://registry.npmjs.org
 
-      - name: Install Dependencies
-        run: npm install --legacy-peer-deps
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Build Package
-        run: npm run build
-
-      - name: Check Registry Status
-        id: check_version
+      - name: Verify package version matches release tag
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          echo "Checking registry for $PACKAGE_NAME@$PACKAGE_VERSION..."
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
 
-          if npm info "$PACKAGE_NAME@$PACKAGE_VERSION" --json > /dev/null 2>&1; then
-            echo "Version $PACKAGE_VERSION already exists on npm."
-            echo "should_publish=false" >> $GITHUB_OUTPUT
-          else
-            echo "Version $PACKAGE_VERSION is missing from npm."
-            echo "should_publish=true" >> $GITHUB_OUTPUT
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "package.json version ($VERSION) does not match release tag ($TAG)"
+            exit 1
           fi
 
-      - name: Run Changeset Action
-        id: changesets
-        uses: changesets/action@v1
-        with:
-          publish: npx changeset publish --access public
-          createGithubReleases: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Build
+        run: npm run build
 
-      - name: Fallback Manual Release Handler
-        if: steps.check_version.outputs.should_publish == 'true' && steps.changesets.outputs.published != 'true'
-        run: |
-          echo "Changesets step skipped publication. Running fallback manual publisher..."
-          
-          # Inject token authorization into the runner runtime
-          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
-          
-          # Force publish using changesets directly to guarantee tagging and metadata matching
-          npx changeset publish
+      - name: Publish
+        run: npm publish --provenance --access public
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
