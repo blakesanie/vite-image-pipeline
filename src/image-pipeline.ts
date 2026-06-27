@@ -19,18 +19,6 @@ interface CacheEntry<T> {
   data: T;
 }
 
-interface EmbeddingCacheSchema {
-  [filePath: string]: CacheEntry<number[]>;
-}
-
-interface ColorCacheSchema {
-  [filePath: string]: CacheEntry<{ r: number; g: number; b: number }>;
-}
-
-interface BlurCacheSchema {
-  [filePath: string]: CacheEntry<string>; // Base64 Data URI string
-}
-
 export interface ImagePipelineOptions {
   modelName?: string;
   metadataCachePath?: string;
@@ -60,18 +48,23 @@ export function setOptions(newOptions: ImagePipelineOptions) {
 
 // metadata
 
-let metadataCache: Record<string, CacheEntry<Tags>> | null = null;
-let metadataLock: Promise<any> = Promise.resolve();
+declare global {
+  var metadataCache: Record<string, CacheEntry<Tags>> | null;
+  var metadataLock: Promise<any>;
+}
+
+globalThis.metadataCache = null;
+globalThis.metadataLock = Promise.resolve();
 
 export async function getMetadata(
   filePaths: string[],
 ): Promise<Record<string, Tags>> {
-  const currentLock = metadataLock.catch(() => { });
+  const currentLock = globalThis.metadataLock.catch(() => { });
   const executionPromise = (async () => {
     await currentLock;
 
-    if (!metadataCache) {
-      metadataCache = await loadCache<CacheEntry<Tags>>(options.metadataCachePath);
+    if (!globalThis.metadataCache) {
+      globalThis.metadataCache = await loadCache<CacheEntry<Tags>>(options.metadataCachePath);
     }
     const fileDescriptorsArray = await Promise.all([
       ...filePaths.map(async (filePath) => {
@@ -80,7 +73,7 @@ export async function getMetadata(
       }),
     ]);
 
-    if (!metadataCache)
+    if (!globalThis.metadataCache)
       throw Error(`[astro-image-pipeline] Failed to load metadata cache.`);
 
     const results: Record<string, Tags> = {};
@@ -89,7 +82,7 @@ export async function getMetadata(
     let cacheHits = 0;
 
     for (const desc of fileDescriptorsArray) {
-      const cached = metadataCache[desc.filePath];
+      const cached = globalThis.metadataCache![desc.filePath];
       if (
         cached &&
         cached.mtime === desc.mtime &&
@@ -134,7 +127,7 @@ export async function getMetadata(
       }),
     );
 
-    await saveCache(options.metadataCachePath, metadataCache);
+    await saveCache(options.metadataCachePath, globalThis.metadataCache);
     return results;
   })();
 
@@ -144,9 +137,15 @@ export async function getMetadata(
 
 // embeddings
 
-let embeddingCache: Record<string, CacheEntry<number[]>> | null = null;
-let embeddingLock: Promise<any> = Promise.resolve();
-let visionPipeline: any = null;
+declare global {
+  var embeddingCache: Record<string, CacheEntry<number[]>> | null;
+  var embeddingLock: Promise<any>;
+  var visionPipeline: any;
+}
+
+globalThis.embeddingCache = null;
+globalThis.embeddingLock = Promise.resolve();
+globalThis.visionPipeline = null;
 
 export async function getEmbeddings(
   filePaths: string[],
@@ -155,8 +154,8 @@ export async function getEmbeddings(
   const executionPromise = (async () => {
     await currentLock;
 
-    if (!embeddingCache) {
-      embeddingCache = await loadCache<CacheEntry<number[]>>(options.embeddingCachePath);
+    if (!globalThis.embeddingCache) {
+      globalThis.embeddingCache = await loadCache<CacheEntry<number[]>>(options.embeddingCachePath);
     }
 
     const fileDescriptorsArray = await Promise.all([
@@ -166,7 +165,7 @@ export async function getEmbeddings(
       }),
     ]);
 
-    if (!embeddingCache)
+    if (!globalThis.embeddingCache)
       throw Error(`[astro-image-pipeline] Failed to load embedding cache.`);
 
     const results: Record<string, number[]> = {};
@@ -175,7 +174,7 @@ export async function getEmbeddings(
     let cacheHits = 0;
 
     for (const desc of fileDescriptorsArray) {
-      const cached = embeddingCache[desc.filePath];
+      const cached = globalThis.embeddingCache![desc.filePath];
       if (
         cached &&
         cached.mtime === desc.mtime &&
@@ -246,7 +245,7 @@ export async function getEmbeddings(
             flatData.subarray(start, end),
           ) as number[];
 
-          embeddingCache![desc.filePath] = {
+          globalThis.embeddingCache![desc.filePath] = {
             mtime: desc.mtime,
             size: desc.size,
             hash: desc.hash,
@@ -266,16 +265,16 @@ export async function getEmbeddings(
       }
     }
 
-    await saveCache(options.embeddingCachePath, embeddingCache);
+    await saveCache(options.embeddingCachePath, globalThis.embeddingCache);
     return results;
   })();
 
-  embeddingLock = executionPromise;
+  globalThis.embeddingLock = executionPromise;
   return await executionPromise;
 }
 
 async function getPipeline() {
-  if (visionPipeline) return visionPipeline;
+  if (globalThis.visionPipeline) return globalThis.visionPipeline;
 
   env.useFSCache = true;
   env.cacheDir = path.resolve(options.modelCachePath);
@@ -285,34 +284,39 @@ async function getPipeline() {
   }
   env.allowLocalModels = true;
   try {
-    visionPipeline =
+    globalThis.visionPipeline =
       await pipeline("image-feature-extraction", options.modelName, {
         device: "cpu",
       });
   } catch {
     env.allowLocalModels = false;
-    visionPipeline =
+    globalThis.visionPipeline =
       await pipeline("image-feature-extraction", options.modelName, {
         device: "cpu",
       });
   }
   console.log(`[astro-image-pipeline] Image embedding pipeline loaded.`);
-  return visionPipeline;
+  return globalThis.visionPipeline;
 }
 
 // blur placeholder
 
-let blurCache: Record<string, CacheEntry<string>> | null = null;
-let blurLock: Promise<any> = Promise.resolve();
+declare global {
+  var blurCache: Record<string, CacheEntry<string>> | null;
+  var blurLock: Promise<any>;
+}
+
+globalThis.blurCache = null;
+globalThis.blurLock = Promise.resolve();
 
 export async function getImageBlurPlaceholders(
   filePaths: string[],
 ): Promise<Record<string, string>> {
-  const currentLock = blurLock.catch(() => { });
+  const currentLock = globalThis.blurLock.catch(() => { });
   const executionPromise = (async () => {
     await currentLock;
 
-    if (!blurCache) blurCache = await loadCache(options.blurCachePath);
+    if (!globalThis.blurCache) globalThis.blurCache = await loadCache(options.blurCachePath);
 
     const fileDescriptorsArray = await Promise.all([
       ...filePaths.map(async (filePath) => {
@@ -329,7 +333,7 @@ export async function getImageBlurPlaceholders(
     let cacheHits = 0;
 
     for (const desc of fileDescriptorsArray) {
-      const cached = blurCache[desc.filePath];
+      const cached = globalThis.blurCache![desc.filePath];
       if (
         cached &&
         cached.mtime === desc.mtime &&
@@ -368,7 +372,7 @@ export async function getImageBlurPlaceholders(
                 : "image/jpeg";
           const dataUri = `data:${mimeType};base64,${base64}`;
 
-          blurCache![desc.filePath] = {
+          globalThis.blurCache![desc.filePath] = {
             mtime: desc.mtime,
             size: desc.size,
             hash: desc.hash,
@@ -384,27 +388,32 @@ export async function getImageBlurPlaceholders(
       }),
     );
 
-    await saveCache(options.blurCachePath, blurCache);
+    await saveCache(options.blurCachePath, globalThis.blurCache);
     return results;
   })();
 
-  blurLock = executionPromise;
+  globalThis.blurLock = executionPromise;
   return await executionPromise;
 }
 
 // placeholder color
 
-let colorCache: Record<string, CacheEntry<{ r: number; g: number; b: number }>> | null = null;
-let colorLock: Promise<any> = Promise.resolve();
+declare global {
+  var colorCache: Record<string, CacheEntry<{ r: number; g: number; b: number }>> | null;
+  var colorLock: Promise<any>;
+}
+
+globalThis.colorCache = null;
+globalThis.colorLock = Promise.resolve();
 
 export async function getImageColors(
   filePaths: string[]
 ): Promise<Record<string, { r: number; g: number; b: number }>> {
-  const currentLock = colorLock.catch(() => { });
+  const currentLock = globalThis.colorLock.catch(() => { });
   const executionPromise = (async () => {
     await currentLock;
 
-    if (!colorCache) colorCache = await loadCache(options.colorCachePath);
+    if (!globalThis.colorCache) globalThis.colorCache = await loadCache(options.colorCachePath);
 
     const fileDescriptorsArray = await Promise.all([
       ...filePaths.map(async (filePath) => {
@@ -413,7 +422,7 @@ export async function getImageColors(
       }),
     ]);
 
-    if (!colorCache)
+    if (!globalThis.colorCache)
       throw Error(`[astro-image-pipeline] Failed to load color cache.`);
 
     const results: Record<string, { r: number; g: number; b: number }> = {};
@@ -421,7 +430,7 @@ export async function getImageColors(
     let cacheHits = 0;
 
     for (const desc of fileDescriptorsArray) {
-      const cached = colorCache[desc.filePath];
+      const cached = globalThis.colorCache![desc.filePath];
       if (
         cached &&
         cached.mtime === desc.mtime &&
@@ -446,7 +455,7 @@ export async function getImageColors(
           const { dominant } = await sharpInstance.stats();
           const payload = { r: dominant.r, g: dominant.g, b: dominant.b };
 
-          colorCache![desc.filePath] = {
+          globalThis.colorCache![desc.filePath] = {
             mtime: desc.mtime,
             size: desc.size,
             hash: desc.hash,
@@ -461,22 +470,26 @@ export async function getImageColors(
         }
       }),
     );
-    console.log(`[astro-image-pipeline] found dominant colors`)
-    await saveCache(options.colorCachePath, colorCache);
+    await saveCache(options.colorCachePath, globalThis.colorCache);
     return results;
   })();
 
-  colorLock = executionPromise;
+  globalThis.colorLock = executionPromise;
   return await executionPromise;
 }
 
 // remote image
 
-
-const remotePlatforms = new Map<string, RemotePlatform>();
-
-// 2. A central mutation lock to ensure file array registration is fully atomic
-let registryLock: Promise<string[]> = Promise.resolve([]);
+declare global {
+  var remotePlatforms: Map<string, RemotePlatform>;
+  var registryLock: Promise<string[]>;
+}
+if (!globalThis.remotePlatforms) {
+  globalThis.remotePlatforms = new Map<string, RemotePlatform>();
+}
+if (!globalThis.registryLock) {
+  globalThis.registryLock = Promise.resolve([]);
+}
 
 export async function uploadRemoteImages(
   remoteOptions: RemoteImageOptions,
@@ -489,24 +502,20 @@ export async function uploadRemoteImages(
     return filepaths;
   }
 
-  if (remoteOptions.platform == "cloudflare-r2") {
-    if (!process.env.R2_PUBLIC_URL) {
-      throw new Error(`[astro-image-pipeline] R2_PUBLIC_URL not defined for cloudflare-r2 remote images.`)
-    }
-  }
+  console.log("[astro-image-pipeline] should upload to remote");
 
-  const currentLock = registryLock.catch(() => { });
+  const currentLock = globalThis.registryLock.catch(() => { });
 
   const executionPromise = (async () => {
     await currentLock;
 
     const id = remotePlatformId(remoteOptions);
-
-    let platform = remotePlatforms.get(id);
+    console.log("[astro-image-pipeline] remote platform id", id);
+    let platform = globalThis.remotePlatforms.get(id);
     if (!platform) {
       platform = RemotePlatform(remoteOptions);
       platform.validate();
-      remotePlatforms.set(id, platform);
+      globalThis.remotePlatforms.set(id, platform);
     }
 
     return filepaths.map(filepath => {
@@ -515,20 +524,18 @@ export async function uploadRemoteImages(
       return platform.generateRemoteUrl(cleanPath);
     })
   })();
-  registryLock = executionPromise;
+  globalThis.registryLock = executionPromise;
   return await executionPromise;
 }
 
 let uploadLock: Promise<void> = Promise.resolve();
 
 async function processRemoteUploads() {
+  console.log(`[astro-image-pipeline] Starting to upload remote images`, globalThis.remotePlatforms)
   const currentLock = uploadLock.catch(() => { });
   const executionPromise = (async () => {
     await currentLock;
-    const ids = Object.keys(remotePlatforms);
-    for (const id of ids) {
-      const platform = remotePlatforms.get(id);
-      if (!platform) continue;
+    for (const [id, platform] of globalThis.remotePlatforms.entries()) {
       try {
         console.log(`[astro-image-pipeline] Uploading remote images for platform ${id}`);
         await platform.upload();
@@ -536,7 +543,7 @@ async function processRemoteUploads() {
       } catch (e) {
         console.error(`[astro-image-pipeline] Failed to upload remote images for platform ${id}:`, e);
       }
-      remotePlatforms.delete(id);
+      globalThis.remotePlatforms.delete(id);
     }
   })();
   uploadLock = executionPromise;
@@ -548,8 +555,8 @@ async function stop() {
   try {
     await exiftool.end();
   } catch (e) { }
-  if (visionPipeline) {
-    visionPipeline = null;
+  if (globalThis.visionPipeline) {
+    globalThis.visionPipeline = null;
   }
 }
 

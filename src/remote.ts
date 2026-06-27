@@ -2,6 +2,8 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { existsSync } from "fs";
 import path from "path";
 import fs from "fs/promises";
+import crypto from "crypto";
+
 
 type RemotePlatformType = "cloudflare-r2";
 
@@ -95,16 +97,29 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                                     const fileBuffer = await fs.readFile(targetDistLocation);
                                     const ext = path.extname(targetDistLocation).toLowerCase();
 
-                                    console.log(`[astro-image-pipeline] Uploading to R2: "${relativeObjectPath}"`);
+                                    const localMD5 = crypto.createHash("md5").update(fileBuffer).digest("hex");
+                                    const localETag = `"${localMD5}"`;
 
-                                    await s3Client.send(
-                                        new PutObjectCommand({
-                                            Bucket: options.bucketName,
-                                            Key: relativeObjectPath,
-                                            Body: fileBuffer,
-                                            ContentType: getMimeType(ext),
-                                        })
-                                    );
+                                    console.log(`[astro-image-pipeline] Uploading to R2: "${relativeObjectPath}"`);
+                                    try {
+                                        await s3Client.send(
+                                            new PutObjectCommand({
+                                                Bucket: options.bucketName,
+                                                Key: relativeObjectPath,
+                                                Body: fileBuffer,
+                                                ContentType: getMimeType(ext),
+                                                IfNoneMatch: localETag
+                                            })
+                                        );
+                                    } catch (uploadErr: any) {
+                                        // 3. If Cloudflare detects the hashes match, it throws a PreconditionFailed error
+                                        if (uploadErr.name === "PreconditionFailed" || uploadErr.$metadata?.httpStatusCode === 412) {
+                                            console.log(`[astro-image-pipeline] Cache hit (Skipped): "${relativeObjectPath}" hashes match perfectly.`);
+                                        } else {
+                                            // Throw actual network/credential errors upward
+                                            throw uploadErr;
+                                        }
+                                    }
 
                                     // Purge local file upon successful upload
                                     await fs.unlink(targetDistLocation);
