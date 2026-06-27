@@ -1,25 +1,56 @@
 # vite-image-pipeline
 
-A high-performance, asset-caching image pipeline designed for [**Vite**](https://vite.dev/ "null")\-based projects ([**Astro**](https://astro.build/ "null"), [**React**](https://react.dev/ "null"), [**Svelte**](https://svelte.dev/ "null"), [**Vue**](https://vuejs.org/ "null"), [**Solid**](https://www.solidjs.com/ "null"), and more). It extracts rich metadata, generates ML-driven vector embeddings (using local CLIP models), computes blur placeholders, samples dominant colors, and handles remote platform uploads during production builds.
+A high-performance, asset-caching image pipeline designed for **[Vite](https://vite.dev/)**-based projects (**[Astro](https://astro.build/)**, **[React](https://react.dev/)**, **[Svelte](https://svelte.dev/)**, **[Vue](https://vuejs.org/)**, **[Solid](https://www.solidjs.com/)**, and more). It extracts rich metadata, generates local ML-driven vector embeddings, computes low-resolution blur placeholders, samples dominant colors, and handles zero-egress remote platform uploads during production builds.
 
-While `vite-image-pipeline` is completely framework-agnostic and can be utilized in any Vite context, it also includes a dedicated integration for [**Astro**](https://astro.build/ "null") to automatically coordinate cleanup and remote synchronization on production builds.
+While `vite-image-pipeline` is completely framework-agnostic and can be utilized in any Vite context, it also includes a dedicated integration for **[Astro](https://astro.build/)** to automatically coordinate cleanup and remote synchronization on production builds.
 
-This package is designed to work seamlessly **in conjunction with** image compression and optimization tools such as [**vite-imagetools**](https://github.com/JonasKruckenberg/imagetools "null") or Astro's native [**Image Component**](https://docs.astro.build/en/guides/images/ "null"). It processes your original source assets to power features like semantic visual search, UI color-matching, and custom lazy-loading states, leaving the final layout rendering and resizing to your preferred UI layer.
+## Why Use This?
+
+This package is designed to work seamlessly **in conjunction with** image compression and optimization tools such as **[vite-imagetools](https://github.com/JonasKruckenberg/imagetools)** or Astro's native **[Image Component](https://docs.astro.build/en/guides/images/)**.
+
+Instead of replacing image optimizers, it splits the pipeline into two parallel, specialized paths that merge gracefully at the UI layer:
+
+```
+                      [ Source Image Asset ]
+                                │
+            ┌───────────────────┴───────────────────┐
+            ▼                                       ▼
+┌───────────────────────┐               ┌───────────────────────┐
+│  vite-image-pipeline  │               │   vite-imagetools /   │
+│  (Data Extraction)    │               │    Astro's <Image>    │
+├───────────────────────┤               ├───────────────────────┤
+│ • EXIF Metadata       │               │ • Multi-format output │
+│ • Blur Placeholders   │               │   (WebP, AVIF, JPEG)  │
+│ • Dominant Colors     │               │ • Fluid UI Resizing   │
+│ • Semantic Vectors    │               │ • File Compression    │
+└───────────┬───────────┘               └───────────┬───────────┘
+            │                                       │
+            ▼                                       ▼
+ [ JSON Cache / Cloud CDN ]             [ Optimized Web Assets ]
+            │                                       │
+            └───────────────────┬───────────────────┘
+                                ▼
+                    ┌───────────────────────┐
+                    │      Frontend UI      │
+                    │ (Astro / React / etc) │
+                    ├───────────────────────┤
+                    │ • Low-CLS Blur loading│
+                    │ • Dynamic BG Tints    │
+                    │ • Semantic Search     │
+                    └───────────────────────┘
+
+```
+
+It processes your original source assets to power rich frontend features like **semantic visual search**, **dynamic UI color-matching**, and **custom lazy-loading states**, leaving final layout rendering, sizing, and responsive resizing to your preferred UI layer.
 
 ## Features
 
--   **Aggressive Content-Based Caching:** Uses file modification times, sizes, and cryptographic hashes to ensure images are processed exactly once unless modified.
-    
--   **EXIF Metadata Extraction:** Powered by [**exiftool-vendored**](https://github.com/photostructure/exiftool-vendored.js "null") for comprehensive tag reading.
-    
--   **Local Machine Learning Embeddings:** Generates semantic image vectors locally using ONNX runtime and [**Transformers.js**](https://huggingface.co/docs/transformers.js "null") (`Xenova/clip-vit-base-patch32`), ideal for building semantic image search or recommendation engines.
-    
--   **UI Enhancements:** Generates ultra-fast low-res base64 blur placeholders and dominant color palettes using [**sharp**](https://sharp.pixelplumbing.com/ "null").
-    
--   **Cloud Upload Sync:** Offloads asset distribution to remote CDNs during production builds while maintaining local URLs during development.
-    
--   **Race-Condition Safe:** Implements a promise-locking mechanism to guarantee thread/hook-safe evaluation inside parallel Vite or Astro build environments.
-    
+* **Aggressive Content-Based Caching:** Cross-references file modification times (`mtime`), sizes, and fast initial-block cryptographic hashes to guarantee assets are processed exactly once unless edited.
+* **EXIF Metadata Extraction:** Powered by **[exiftool-vendored](https://github.com/photostructure/exiftool-vendored.js)** for lightning-fast, comprehensive tag reading (Camera model, lens, exposure, timestamps, geo-coordinates).
+* **Local Machine Learning Embeddings:** Generates normalized semantic image vectors locally using ONNX runtime and **[Transformers.js](https://huggingface.co/docs/transformers.js)** (`Xenova/clip-vit-base-patch32`). Perfect for image-to-image or text-to-image similarity matching.
+* **UI Enhancements:** Generates ultra-fast low-res base64 blur placeholders and dominant color palettes using native `sharp` bindings.
+* **Cloud Upload Sync & Zero-Egress Caching:** Offloads assets to remote S3-compatible endpoints (like Cloudflare R2) sequentially during production builds. Leverages `IfNoneMatch` ETag validation to skip uploading unmodified files and purges local build items post-upload to keep your bundle footprint tiny.
+* **Race-Condition Safe:** Implements an internal promise-locking sequence to guarantee thread/hook-safe evaluation inside heavily parallelized Vite or Astro multi-threaded builds.
 
 ## Installation
 
@@ -27,15 +58,123 @@ Install the package via your preferred package manager:
 
 ```bash
 npm install vite-image-pipeline
+
 ```
 
-## Setup & Integration
+## Advanced Configuration
 
-### For Astro Projects
+You can customize cache paths, concurrency profiles, and machine learning runtime characteristics globally at the entry point of your pipeline execution using `setOptions`.
 
-Add the helper integration to your `astro.config.mjs` file to ensure the backend processes safely shut down and remote asset synchronization executes automatically during `astro:build:done`.
+### Complete Options Schema
 
 ```javascript
+import { setOptions } from 'vite-image-pipeline';
+
+setOptions({
+  // The HuggingFace/Transformers.js repository string for feature extraction
+  modelName: "Xenova/clip-vit-base-patch32", 
+  
+  // Number of images processed concurrently during ML vector inference
+  batchSize: 4,                              
+  
+  // Fully qualified filesystem targets for the localized JSON content-caches
+  metadataCachePath: "./.image-pipeline/metadata-cache.json",
+  embeddingCachePath: "./.image-pipeline/embedding-cache.json",
+  colorCachePath: "./.image-pipeline/color-cache.json",
+  blurCachePath: "./.image-pipeline/blur-cache.json",
+  
+  // Target directory where local ONNX weights and tokenizer models are written
+  modelCachePath: "./.image-pipeline/models"
+});
+
+```
+
+## Full API Reference & Examples
+
+### 1. Metadata Extraction
+
+Reads embedded EXIF, IPTC, and XMP metadata out of original source files.
+
+```javascript
+import { getMetadata } from 'vite-image-pipeline';
+
+const images = ['src/assets/photo1.jpg', 'src/assets/photo2.jpg'];
+const metadataMap = await getMetadata(images);
+
+const photo1 = metadataMap['src/assets/photo1.jpg'];
+console.log(`Camera: ${photo1.Model}, Lens: ${photo1.LensModel}, ISO: ${photo1.ISO}`);
+
+```
+
+### 2. Machine Learning Embeddings
+
+Generates a normalized 512-dimensional vector embedding array. These arrays can be sent straight into vector stores (like Chroma, Pinecone, or pgvector) for semantic searching.
+
+```javascript
+import { getEmbeddings } from 'vite-image-pipeline';
+
+const embeddingsMap = await getEmbeddings(['src/assets/photo1.jpg']);
+const vector = embeddingsMap['src/assets/photo1.jpg']; 
+// Output: [0.0124, -0.0452, 0.0911, ... 512 floats long]
+
+```
+
+### 3. Low-Resolution Blur Placeholders
+
+Generates a `20px` wide blurred base64 JPEG/PNG Data URI to avoid Cumulative Layout Shift (CLS) during image lazy-loading.
+
+```javascript
+import { getImageBlurPlaceholders } from 'vite-image-pipeline';
+
+const blurMap = await getImageBlurPlaceholders(['src/assets/photo1.jpg']);
+const placeholderUri = blurMap['src/assets/photo1.jpg'];
+// Output: "data:image/jpeg;base64,/9j/4AAQSkZJR..."
+
+```
+
+### 4. Dominant Color Sampling
+
+Extracts the principal structural RGB values of an image to match container background colors before asset load execution completes.
+
+```javascript
+import { getImageColors } from 'vite-image-pipeline';
+
+const colorsMap = await getImageColors(['src/assets/photo1.jpg']);
+const { r, g, b } = colorsMap['src/assets/photo1.jpg'];
+console.log(`Dominant Background: rgb(${r}, ${g}, ${b})`);
+
+```
+
+### 5. Remote Cloud Upload Registry
+
+Queues assets to pass onto remote storage during production compiles. Automatically bypasses uploads during development mode (`import.meta.env.PROD === false`).
+
+```javascript
+import { uploadRemoteImages } from 'vite-image-pipeline';
+
+const remoteOptions = {
+  platform: 'cloudflare-r2',
+  accountId: process.env.R2_ACCOUNT_ID,
+  r2AccessKey: process.env.R2_ACCESS_KEY,
+  r2SecretKey: process.env.R2_SECRET_KEY,
+  bucketName: 'my-gallery-cdn',
+  outDir: 'dist' // Local output distribution path to read from and prune
+};
+
+const transformedUrls = await uploadRemoteImages(remoteOptions, ['src/assets/photo1.jpg']);
+// Dev output:  ['src/assets/photo1.jpg']
+// Prod output: ['https://my-gallery-cdn.r2.cloudflarestorage.com/src/assets/photo1.jpg']
+
+```
+
+## Comprehensive Implementation Recipes
+
+### Astro (Production SSG / SSR)
+
+Add the integration manager hook to your `astro.config.mjs` setup to coordinate graceful engine shutdown (`exiftool` worker pools) and handle file uploading sequences during `astro:build:done`.
+
+```javascript
+// astro.config.mjs
 import { defineConfig } from 'astro/config';
 import { astroImagePipelinePlugin } from 'vite-image-pipeline';
 
@@ -44,169 +183,144 @@ export default defineConfig({
     astroImagePipelinePlugin()
   ]
 });
+
 ```
 
-### For Non-Astro Vite Projects (React, Vue, Svelte, etc.)
-
-Because the pipeline uses a robust programmatic API, you can import and run the utility functions anywhere in your build scripts, dev servers, or server-side frameworks ([**SvelteKit**](https://kit.svelte.dev/ "null"), [**Next.js**](https://nextjs.org/ "null"), [**Nuxt**](https://nuxt.com/ "null"), etc.):
-
-```javascript
-import { getEmbeddings, getImageColors } from 'vite-image-pipeline';
-
-// Use directly in your data-loading scripts, API endpoints, or pre-render hooks
-```
-
-### Configure Options (Optional)
-
-You can customize cache locations, batch processing sizes, and the target machine learning model globally at the entry point of your pipeline execution:
-
-```javascript
-import { setOptions } from 'vite-image-pipeline';
-
-setOptions({
-    modelName: "Xenova/clip-vit-base-patch32", // Target embedding model
-    batchSize: 4,                              // Concurrent images sent to ML inference
-    metadataCachePath: "./.custom-cache/metadata.json",
-    embeddingCachePath: "./.custom-cache/embeddings.json"
-});
-```
-
-## API Reference & Usage Examples
-
-### Metadata Extraction
-
-Reads embedded EXIF/IPTC metadata information out of your original source files.
-```javascript
-import { getMetadata } from 'vite-image-pipeline';
-
-const images = ['src/assets/photo1.jpg', 'src/assets/photo2.jpg'];
-const metadataMap = await getMetadata(images);
-
-const photo1Tags = metadataMap['src/assets/photo1.jpg'];
-console.log(`Shot taken with camera: ${photo1Tags.Model}`);
-```
-
-### Machine Learning Embeddings
-
-Generates normalized vector embeddings of your images. These arrays can be passed straight into vector databases (like [**Chroma**](https://www.trychroma.com/ "null"), [**Pinecone**](https://www.pinecone.io/ "null"), or [**pgvector**](https://github.com/pgvector/pgvector "null")) to enable image-to-image or text-to-image searching.
-
-    import { getEmbeddings } from 'vite-image-pipeline';
-    
-    const embeddingsMap = await getEmbeddings(['src/assets/photo1.jpg']);
-    const vector = embeddingsMap['src/assets/photo1.jpg']; 
-    // Output: Array of numbers (e.g., length 512 for CLIP)
-    
-
-### Low-Resolution Blur Placeholders
-
-Generates a small, base64 encoded Data URI placeholder to minimize [**Cumulative Layout Shift (CLS)**](https://web.dev/cls/ "null") and enable sleek "blur-up" loading configurations.
-
-```javascript
-import { getImageBlurPlaceholders } from 'vite-image-pipeline';
-
-const blurMap = await getImageBlurPlaceholders(['src/assets/photo1.jpg']);
-const placeholderUri = blurMap['src/assets/photo1.jpg'];
-// Output: "data:image/jpeg;base64,/9j/4AAQSkZJR..."
-```
-    
-
-### Dominant Color Sampling
-
-Extracts the mathematical dominant color from an image. This is highly useful for assigning container background fallbacks before images load, or tinting modern UI wrappers dynamically.
-
-```javascript
-import { getImageColors } from 'vite-image-pipeline';
-    
-const colorsMap = await getImageColors(['src/assets/photo1.jpg']);
-const { r, g, b } = colorsMap['src/assets/photo1.jpg'];
-console.log(`Dominant RGB: rgb(${r}, ${g}, ${b})`);
-```
-
-### Remote Cloud Upload Registry
-
-Queues files for production CDN synchronization. By default, this mechanism gracefully falls back to returning local paths during development (`import.meta.env.PROD === false`) and fires off multi-platform uploads sequentially when triggered (or automatically during the Astro build lifecycle).
-
-```javascript
-import { uploadRemoteImages } from 'vite-image-pipeline';
-
-const remoteOptions = {
-    platform: 's3', // configuration schema depends on your remote implementation
-    bucket: 'my-production-cdn'
-};
-
-const transformedUrls = await uploadRemoteImages(
-    remoteOptions, 
-    ['src/assets/photo1.jpg']
-);
-// In Dev:  ['src/assets/photo1.jpg']
-// In Prod: ['[https://my-production-cdn.s3.amazonaws.com/assets/photo1.jpg](https://my-production-cdn.s3.amazonaws.com/assets/photo1.jpg)']
-```
-    
-
-## Architectural Compatibility
-
-This pipeline operates on the **source assets** and extracts structural insights or registers cloud delivery rules. It does not replace UI optimization tooling.
-
-### Synergy with `vite-imagetools` or Astro `<Image />`
-
-You should use this pipeline alongside your visual optimization workflows to achieve high performance combined with smart data features:
-
-#### Example in Astro
+#### Inside an Astro Component (`src/components/SmartImage.astro`)
 
 ```astro
 ---
-// src/pages/gallery.astro
 import { Image } from 'astro:assets';
-import { getImageBlurPlaceholders, getImageColors } from 'vite-image-pipeline';
-import localImage from '../assets/hero.jpg';
+import { getImageBlurPlaceholders, getImageColors, getMetadata } from 'vite-image-pipeline';
 
-// 1. Run pipeline tasks using absolute path references
-const assetPath = localImage.fsPath; 
-const blurMap = await getImageBlurPlaceholders([assetPath]);
-const colorMap = await getImageColors([assetPath]);
+interface Props {
+  imageAsset: any; // Astro ESM Image Import Reference
+  alt: string;
+}
 
-const placeholder = blurMap[assetPath];
-const dominantColor = colorMap[assetPath];
+const { imageAsset, alt } = Astro.props;
+
+// 1. Resolve structural filesystem pathing safely
+const absolutePath = imageAsset.fsPath;
+
+// 2. Fetch data parallelized via content caching locks
+const [blurMap, colorMap, metaMap] = await Promise.all([
+  getImageBlurPlaceholders([absolutePath]),
+  getImageColors([absolutePath]),
+  getMetadata([absolutePath])
+]);
+
+const blurPlaceholder = blurMap[absolutePath];
+const { r, g, b } = colorMap[absolutePath];
+const cameraModel = metaMap[absolutePath]?.Model || "Unknown Camera";
 ---
 
 <div 
-    class="image-container" 
-    style={`background-color: rgb(${dominantColor.r}, ${dominantColor.g}, ${dominantColor.b});`}
+  class="image-wrapper" 
+  style={`background-color: rgb(${r}, ${g}, ${b}); position: relative; overflow: hidden;`}
 >
-    <!-- Use Astro's standard image component for final HTML generation & resizing -->
-    <Image 
-    src={localImage} 
-    alt="Hero visual description" 
-    style={`background-image: url(${placeholder}); background-size: cover;`} 
-    />
+  <Image 
+    src={imageAsset} 
+    alt={alt}
+    loading="lazy"
+    style={`background-image: url(${blurPlaceholder}); background-size: cover;`}
+  />
+  <span class="exif-overlay">Shot on: {cameraModel}</span>
 </div>
+
+<style>
+  .image-wrapper img { transition: filter 0.3s ease-out; }
+  .exif-overlay { position: absolute; bottom: 8px; left: 8px; color: #fff; font-size: 0.75rem; }
+</style>
+
 ```
 
-#### Example in React + `vite-imagetools`
+### React + Vite (With `vite-imagetools`)
+
+In non-Astro build architectures, call the data functions directly within your build runner, build plugins, data-loading environments, or node generation engines.
+
+#### Step 1: Pre-render Data Config Script (`scripts/process-images.js`)
+
+Run this process script before or during your main build loop to extract assets details into localized JSON references:
 
 ```javascript
-// src/components/Hero.jsx
-import React from 'react';
-// Import resized/optimized images with vite-imagetools query params
-import optimizedHero from '../assets/hero.jpg?width=800&format=webp';
+import fs from 'fs/promises';
+import glob from 'fast-glob';
+import { getImageBlurPlaceholders, getImageColors } from 'vite-image-pipeline';
 
-export function Hero({ blurPlaceholder, dominantColor }) {
-    return (
-    <div 
-        className="hero-wrapper" 
-        style={{ 
-        backgroundColor: `rgb(${dominantColor.r}, ${dominantColor.g}, ${dominantColor.b})` 
-        }}
-    >
-        <img 
-        src={optimizedHero} 
-        alt="Hero image"
-        style={{
-            backgroundImage: `url(${blurPlaceholder})`,
-            backgroundSize: 'cover',
-        }}
-        />
-    </div>
-    );
+async function buildStaticManifest() {
+  const filePaths = await glob('src/assets/gallery/*.{jpg,jpeg,png,webp}');
+  
+  const [blurs, colors] = await Promise.all([
+    getImageBlurPlaceholders(filePaths),
+    getImageColors(filePaths)
+  ]);
+
+  const manifest = filePaths.reduce((acc, rawPath) => {
+    acc[rawPath] = {
+      blur: blurs[rawPath],
+      color: colors[rawPath]
+    };
+    return acc;
+  }, {});
+
+  await fs.writeFile('./src/image-manifest.json', JSON.stringify(manifest, null, 2));
+  console.log('⚡ Image pipeline data manifest compiled.');
 }
+
+buildStaticManifest();
+
 ```
+
+#### Step 2: Consume Data inside your React UI Engine
+
+```jsx
+import React from 'react';
+// 1. Load optimized images via query-params from vite-imagetools
+import optimizedHero from '../assets/gallery/lake-sunset.jpg?width=1200&format=avif';
+// 2. Import the statically generated metadata mapping file
+import imageManifest from '../image-manifest.json';
+
+const ASSET_KEY = 'src/assets/gallery/lake-sunset.jpg';
+
+export function HighPerformanceHero() {
+  const uiMeta = imageManifest[ASSET_KEY] || { blur: '', color: { r: 30, g: 30, b: 30 } };
+  const { r, g, b } = uiMeta.color;
+
+  return (
+    <div 
+      className="hero-container" 
+      style={{ backgroundColor: `rgb(${r}, ${g}, ${b})`, minHeight: '400px' }}
+    >
+      <img 
+        src={optimizedHero} 
+        alt="Lake Sunset" 
+        loading="lazy"
+        style={{
+          backgroundImage: `url(${uiMeta.blur})`,
+          backgroundSize: 'cover',
+          width: '100%',
+          height: 'auto'
+        }}
+      />
+    </div>
+  );
+}
+
+```
+
+## Troubleshooting
+
+### Machine Learning Performance Tweaks
+
+When compiling in standard local environments, `Transformers.js` splits processes dynamically over multicore nodes. If processing locks up execution inside CI/CD cloud actions (like GitHub Actions runners or Vercel build instances), pin execution to a single worker profile core manually:
+
+```bash
+NODE_ENV=production npm run build
+```
+
+*(The engine sets `wasm.numThreads = 1` dynamically when detecting `production` variables to avoid thread overhead allocation crashes).*
+
+### Cloudflare R2 Upload Checksums 412 Errors
+
+If you see skipped execution responses reporting `PreconditionFailed` or `412` HTTP codes during automated deployment pipelines, **this behavior is intentional**. It guarantees that files whose cryptographic hashes match assets currently hosted on your R2 object storage CDN avoid re-upload workflows, saving you bandwidth and billing resource allocations.
