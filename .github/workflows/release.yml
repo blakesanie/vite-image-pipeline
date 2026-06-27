@@ -12,6 +12,10 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    # Explicitly grant the GITHUB_TOKEN write access to push code and create PRs
+    permissions:
+      contents: write
+      pull-requests: write
     # Execute if triggered manually OR if the push commit is a Pull Request merge event.
     # This prevents the workflow from executing on direct, forced, or unreviewed commits pushed straight to main.
     if: |
