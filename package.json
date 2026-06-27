@@ -1,10 +1,22 @@
 {
-  "name": "@blakesanie/vite-image-pipeline",
+  "name": "vite-image-pipeline",
   "version": "1.0.1",
   "description": "",
   "type": "module",
   "main": "./dist/image-pipeline.js",
   "types": "./dist/image-pipeline.d.ts",
+  "author": {
+    "name": "Blake Sanie",
+    "url": "https://blakesanie.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blakesanie/vite-image-pipeline.git"
+  },
+  "bugs": {
+    "url": "https://github.com/blakesanie/vite-image-pipeline/issues"
+  },
+  "homepage": "https://github.com/blakesanie/vite-image-pipeline#readme",
   "files": [
     "dist"
   ],
