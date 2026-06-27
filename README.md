@@ -45,6 +45,7 @@ It processes your original source assets to power rich frontend features like **
 
 ## Features
 
+* **Flexible Path Resolution:** Fully supports arbitrary filesystem structures. Paths passed to data extraction functions can be project-relative (e.g., `/src/assets/photo.jpg`), project-root relative (e.g., `src/assets/photo.jpg`), or absolute global paths (e.g., `/Users/username/Desktop/photo.jpg`).
 * **Aggressive Content-Based Caching:** Cross-references file modification times (`mtime`), sizes, and fast initial-block cryptographic hashes to guarantee assets are processed exactly once unless edited.
 * **EXIF Metadata Extraction:** Powered by **[exiftool-vendored](https://github.com/photostructure/exiftool-vendored.js)** for lightning-fast, comprehensive tag reading (Camera model, lens, exposure, timestamps, geo-coordinates).
 * **Local Machine Learning Embeddings:** Generates normalized semantic image vectors locally using ONNX runtime and **[Transformers.js](https://huggingface.co/docs/transformers.js)** (`Xenova/clip-vit-base-patch32`). Perfect for image-to-image or text-to-image similarity matching.
@@ -58,6 +59,26 @@ Install the package via your preferred package manager:
 
 ```bash
 npm install vite-image-pipeline
+
+```
+
+## Path Resolution Rules
+
+The image pipeline intelligently handles the formatting differences introduced by bundler hooks and components across frameworks:
+
+1. **Project-Relative Paths (`/src/*`):** Resolves paths starting with `/src/` straight against your current working directory (`process.cwd()`).
+2. **Absolute Global Paths:** Fully supports native system roots (`/Users/`, `/home/`, or Windows drive letters) for scenarios where images are processed out of external directories.
+3. **Vite Internals (`/@fs/*`):** Automatically cleans up internal prefixes injected by Vite's dev server to match actual file boundaries cleanly.
+
+```javascript
+import { getMetadata } from 'vite-image-pipeline';
+
+// All map keys are fully compatible and safely mapped:
+const data = await getMetadata([
+  '/src/assets/gallery/photo1.jpg',                // Project relative
+  'src/assets/gallery/photo2.jpg',                 // Root relative
+  '/Users/alex/Projects/site/src/assets/photo3.jpg' // Absolute global path
+]);
 
 ```
 
@@ -317,6 +338,7 @@ When compiling in standard local environments, `Transformers.js` splits processe
 
 ```bash
 NODE_ENV=production npm run build
+
 ```
 
 *(The engine sets `wasm.numThreads = 1` dynamically when detecting `production` variables to avoid thread overhead allocation crashes).*
