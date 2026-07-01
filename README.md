@@ -270,7 +270,7 @@ import glob from 'fast-glob';
 import { getImageBlurPlaceholders, getImageColors } from 'vite-image-pipeline';
 
 async function buildStaticManifest() {
-  const filePaths = await glob('src/assets/gallery/*.{jpg,jpeg,png,webp}');
+  const filePaths = await glob('src/assets/gallery/*.{jpg,jpeg,png,webp,avif}');
   
   const [blurs, colors] = await Promise.all([
     getImageBlurPlaceholders(filePaths),

@@ -31,7 +31,7 @@ export function remotePlatformId(options: RemoteImageOptions): string {
         case "cloudflare-r2":
             return `cloudflare-r2#${options.accountId}#${options.bucketName}`;
         default:
-            throw new Error(`[astro-image-pipeline] Unsupported remote platform`);
+            throw new Error(`[vite-image-pipeline] Unsupported remote platform`);
     }
 }
 
@@ -48,16 +48,16 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                 },
                 filepaths: filepathsSet,
                 validate: () => {
-                    if (!options.r2AccessKey) throw Error("[astro-image-pipeline] Cloudflare R2 access key is required");
-                    if (!options.r2SecretKey) throw Error("[astro-image-pipeline] Cloudflare R2 secret key is required");
-                    if (!options.accountId) throw Error("[astro-image-pipeline] Cloudflare R2 account ID is required");
-                    if (!options.bucketName) throw Error("[astro-image-pipeline] Cloudflare R2 bucket name is required");
-                    if (!options.outDir) throw Error("[astro-image-pipeline] Out directory is required (ex. 'dist')");
+                    if (!options.r2AccessKey) throw Error("[vite-image-pipeline] Cloudflare R2 access key is required");
+                    if (!options.r2SecretKey) throw Error("[vite-image-pipeline] Cloudflare R2 secret key is required");
+                    if (!options.accountId) throw Error("[vite-image-pipeline] Cloudflare R2 account ID is required");
+                    if (!options.bucketName) throw Error("[vite-image-pipeline] Cloudflare R2 bucket name is required");
+                    if (!options.outDir) throw Error("[vite-image-pipeline] Out directory is required (ex. 'dist')");
                 },
                 upload: async () => {
                     const filepaths = Array.from(filepathsSet);
                     if (filepaths.length === 0) {
-                        console.log("[astro-image-pipeline] No remote images to upload");
+                        console.log("[vite-image-pipeline] No remote images to upload");
                         return;
                     }
                     const s3Client = new S3Client({
@@ -89,7 +89,7 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                                 const targetDistLocation = path.join(options.outDir, relativeObjectPath);
 
                                 if (!existsSync(targetDistLocation)) {
-                                    console.warn(`[astro-image-pipeline] Local build file missing for upload: ${targetDistLocation}`);
+                                    console.warn(`[vite-image-pipeline] Local build file missing for upload: ${targetDistLocation}`);
                                     return;
                                 }
 
@@ -100,7 +100,7 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                                     const localMD5 = crypto.createHash("md5").update(fileBuffer).digest("hex");
                                     const localETag = `"${localMD5}"`;
 
-                                    console.log(`[astro-image-pipeline] Uploading to R2: "${relativeObjectPath}"`);
+                                    console.log(`[vite-image-pipeline] Uploading to R2: "${relativeObjectPath}"`);
                                     try {
                                         await s3Client.send(
                                             new PutObjectCommand({
@@ -114,7 +114,7 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                                     } catch (uploadErr: any) {
                                         // 3. If Cloudflare detects the hashes match, it throws a PreconditionFailed error
                                         if (uploadErr.name === "PreconditionFailed" || uploadErr.$metadata?.httpStatusCode === 412) {
-                                            console.log(`[astro-image-pipeline] Cache hit (Skipped): "${relativeObjectPath}" hashes match perfectly.`);
+                                            console.log(`[vite-image-pipeline] Cache hit (Skipped): "${relativeObjectPath}" hashes match perfectly.`);
                                         } else {
                                             // Throw actual network/credential errors upward
                                             throw uploadErr;
@@ -124,7 +124,7 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                                     // Purge local file upon successful upload
                                     await fs.unlink(targetDistLocation);
                                 } catch (err) {
-                                    console.error(`[astro-image-pipeline] Failed uploading asset "${relativeObjectPath}":`, err);
+                                    console.error(`[vite-image-pipeline] Failed uploading asset "${relativeObjectPath}":`, err);
                                 }
                             })
                         );
@@ -132,6 +132,6 @@ export function RemotePlatform(options: RemoteImageOptions): RemotePlatform {
                 }
             };
         default:
-            throw new Error(`[astro-image-pipeline] Unsupported remote platform`);
+            throw new Error(`[vite-image-pipeline] Unsupported remote platform`);
     }
 }

@@ -4,7 +4,11 @@ import fs from "fs/promises";
 import { existsSync } from "fs";
 
 export function resolveToAbsolutePath(filePath: string): string {
+    console.log("filepath", filePath)
     let cleanPath = filePath.split("?")[0];
+    if (cleanPath.startsWith("/_astro/")) {
+        return path.resolve(path.join(process.cwd(), "dist", cleanPath));
+    }
     if (cleanPath.startsWith("/@fs")) {
         cleanPath = cleanPath.replace("/@fs", "");
     }
@@ -39,7 +43,7 @@ export async function getFileStatsAndHash(
         return { size, mtime, hash: sampleHash };
     } catch (err) {
         console.error(
-            `[astro-image-pipeline] Failed to generate stats and hash for ${filePath}:`,
+            `[vite-image-pipeline] Failed to generate stats and hash for ${filePath} ${resolveToAbsolutePath(filePath)}:`,
             err,
         );
         throw err;
@@ -53,7 +57,7 @@ export async function loadCache<T>(filepath: string): Promise<Record<string, T>>
             return JSON.parse(raw) as Record<string, T>;
         } catch (e) {
             console.error(
-                `[astro-image-pipeline] Failed to load cache at ${filepath}.`,
+                `[vite-image-pipeline] Failed to load cache at ${filepath}.`,
                 e,
             );
         }
@@ -72,7 +76,7 @@ export async function saveCache(filepath: string, cache: Record<string, any> | n
         );
     } catch (err) {
         console.error(
-            "[astro-image-pipeline] Failed to sync cache:",
+            "[vite-image-pipeline] Failed to sync cache:",
             err,
         );
     }

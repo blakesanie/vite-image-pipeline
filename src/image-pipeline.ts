@@ -74,7 +74,7 @@ export async function getMetadata(
     ]);
 
     if (!globalThis.metadataCache)
-      throw Error(`[astro-image-pipeline] Failed to load metadata cache.`);
+      throw Error(`[vite-image-pipeline] Failed to load metadata cache.`);
 
     const results: Record<string, Tags> = {};
     const distinctFilePaths = new Set();
@@ -100,7 +100,7 @@ export async function getMetadata(
     }
 
     console.log(
-      "[astro-image-pipeline] Metadata cache hits:",
+      "[vite-image-pipeline] Metadata cache hits:",
       cacheHits,
       "/",
       filePaths.length,
@@ -120,7 +120,7 @@ export async function getMetadata(
           results[desc.filePath] = tags;
         } catch (err) {
           console.error(
-            `[astro-image-pipeline] EXIF Extraction Failure for ${desc.filePath}:`,
+            `[vite-image-pipeline] EXIF Extraction Failure for ${desc.filePath}:`,
             err,
           );
         }
@@ -166,7 +166,7 @@ export async function getEmbeddings(
     ]);
 
     if (!globalThis.embeddingCache)
-      throw Error(`[astro-image-pipeline] Failed to load embedding cache.`);
+      throw Error(`[vite-image-pipeline] Failed to load embedding cache.`);
 
     const results: Record<string, number[]> = {};
     const distinctFilePaths = new Set();
@@ -192,7 +192,7 @@ export async function getEmbeddings(
     }
 
     console.log(
-      `[astro-image-pipeline] Embedding cache hits: ${cacheHits} / ${filePaths.length}.`,
+      `[vite-image-pipeline] Embedding cache hits: ${cacheHits} / ${filePaths.length}.`,
     );
 
     if (distinctDescriptorsToProcess.length === 0) return results;
@@ -255,11 +255,11 @@ export async function getEmbeddings(
         });
 
         console.log(
-          `[astro-image-pipeline] Completed embedding generation for batch ${i / options.batchSize + 1} of ${totalBatches}.`,
+          `[vite-image-pipeline] Completed embedding generation for batch ${i / options.batchSize + 1} of ${totalBatches}.`,
         );
       } catch (err) {
         console.error(
-          `[astro-image-pipeline] ML Inference Batch Failure:`,
+          `[vite-image-pipeline] ML Inference Batch Failure:`,
           err,
         );
       }
@@ -295,7 +295,7 @@ async function getPipeline() {
         device: "cpu",
       });
   }
-  console.log(`[astro-image-pipeline] Image embedding pipeline loaded.`);
+  console.log(`[vite-image-pipeline] Image embedding pipeline loaded.`);
   return globalThis.visionPipeline;
 }
 
@@ -326,7 +326,7 @@ export async function getImageBlurPlaceholders(
     ]);
 
     if (!blurCache)
-      throw Error(`[astro-image-pipeline] Failed to load blur cache.`);
+      throw Error(`[vite-image-pipeline] Failed to load blur cache.`);
 
     const results: Record<string, string> = {};
     const distinctDescriptorsToProcess: typeof fileDescriptorsArray = [];
@@ -369,7 +369,9 @@ export async function getImageBlurPlaceholders(
               ? "image/png"
               : ext === "webp"
                 ? "image/webp"
-                : "image/jpeg";
+                : ext === "avif"
+                  ? "image/avif"
+                  : "image/jpeg";
           const dataUri = `data:${mimeType};base64,${base64}`;
 
           globalThis.blurCache![desc.filePath] = {
@@ -381,7 +383,7 @@ export async function getImageBlurPlaceholders(
           results[desc.filePath] = dataUri;
         } catch (err) {
           console.error(
-            `[astro-image-pipeline] Blur Generation Failure for ${desc.filePath}:`,
+            `[vite-image-pipeline] Blur Generation Failure for ${desc.filePath}:`,
             err,
           );
         }
@@ -423,7 +425,7 @@ export async function getImageColors(
     ]);
 
     if (!globalThis.colorCache)
-      throw Error(`[astro-image-pipeline] Failed to load color cache.`);
+      throw Error(`[vite-image-pipeline] Failed to load color cache.`);
 
     const results: Record<string, { r: number; g: number; b: number }> = {};
     const distinctDescriptorsToProcess: typeof fileDescriptorsArray = [];
@@ -464,7 +466,7 @@ export async function getImageColors(
           results[desc.filePath] = payload;
         } catch (err) {
           console.error(
-            `[astro-image-pipeline] Color Generation Failure for ${desc.filePath}:`,
+            `[vite-image-pipeline] Color Generation Failure for ${desc.filePath}:`,
             err,
           );
         }
@@ -502,7 +504,7 @@ export async function uploadRemoteImages(
     return filepaths;
   }
 
-  console.log("[astro-image-pipeline] should upload to remote");
+  console.log("[vite-image-pipeline] should upload to remote");
 
   const currentLock = globalThis.registryLock.catch(() => { });
 
@@ -510,7 +512,7 @@ export async function uploadRemoteImages(
     await currentLock;
 
     const id = remotePlatformId(remoteOptions);
-    console.log("[astro-image-pipeline] remote platform id", id);
+    console.log("[vite-image-pipeline] remote platform id", id);
     let platform = globalThis.remotePlatforms.get(id);
     if (!platform) {
       platform = RemotePlatform(remoteOptions);
@@ -531,17 +533,17 @@ export async function uploadRemoteImages(
 let uploadLock: Promise<void> = Promise.resolve();
 
 async function processRemoteUploads() {
-  console.log(`[astro-image-pipeline] Starting to upload remote images`, globalThis.remotePlatforms)
+  console.log(`[vite-image-pipeline] Starting to upload remote images`, globalThis.remotePlatforms)
   const currentLock = uploadLock.catch(() => { });
   const executionPromise = (async () => {
     await currentLock;
     for (const [id, platform] of globalThis.remotePlatforms.entries()) {
       try {
-        console.log(`[astro-image-pipeline] Uploading remote images for platform ${id}`);
+        console.log(`[vite-image-pipeline] Uploading remote images for platform ${id}`);
         await platform.upload();
-        console.log(`[astro-image-pipeline] Uploaded remote images for platform ${id}`);
+        console.log(`[vite-image-pipeline] Uploaded remote images for platform ${id}`);
       } catch (e) {
-        console.error(`[astro-image-pipeline] Failed to upload remote images for platform ${id}:`, e);
+        console.error(`[vite-image-pipeline] Failed to upload remote images for platform ${id}:`, e);
       }
       globalThis.remotePlatforms.delete(id);
     }
